@@ -28,6 +28,7 @@ Readers who want to move fluidly between page, audio, note-taking, and deep inqu
 - Provide MCP resources, prompts and tools over the same local workspace.
 - Support Codex-session execution for testing/autonomous compilation where available, without silently substituting an API-key provider.
 - Turn a book into a reusable “book skill”: concise purpose, coverage map, concepts/entities, relationships, retrieval rules, citations, and a generated SKILL.md package.
+- Make the skill an operational navigation guide: it routes an agent's current task to bounded chapter, passage, figure/table, and graph context; explains how to apply that context; and requires source verification before answering.
 
 ## 5. Non-goals for v1
 
@@ -96,6 +97,7 @@ Readers who want to move fluidly between page, audio, note-taking, and deep inqu
 - Graph nodes: concept, entity, claim, event, person, place, and section; edges have type, confidence, and source citations.
 - Graph construction runs progressively and can be reviewed/edited before export.
 - A generated book skill contains: intent, source scope, key concepts, graph/index paths, a cited query workflow, and agent guidance against treating generated summaries as primary evidence.
+- Navigation routes contain task/intent triggers, ranked context selectors, token budgets, evidence anchors, usage instructions, and an evidence-first fallback for unmatched questions.
 - The package includes schema version, source hashes, citations/evidence index, quality report, and grounded evaluation cases; `skills.validate` verifies these before it is marked ready.
 
 ### Agent interface

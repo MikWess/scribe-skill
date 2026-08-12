@@ -1,0 +1,64 @@
+{
+  "schemaVersion": "1.0",
+  "skillId": "fixture-evidence-book",
+  "documentHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "purpose": "Navigate a book about evidence-backed knowledge systems.",
+  "defaultMaxTotalTokens": 8000,
+  "evidence": {
+    "anchor-provenance-1": {
+      "id": "anchor-provenance-1",
+      "documentHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "page": 12,
+      "blockId": "block-12-3",
+      "characterRange": { "start": 41, "end": 233 },
+      "extractionRevision": 1,
+      "contentHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "pageImageHash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "boundingBox": { "x": 0.12, "y": 0.22, "width": 0.74, "height": 0.18 }
+    }
+  },
+  "routes": [
+    {
+      "id": "provenance",
+      "description": "Use provenance and evidence anchors when evaluating graph claims.",
+      "triggers": ["provenance", "evidence", "citation", "graph claim"],
+      "tasks": ["verify a claim", "design cited knowledge graphs"],
+      "context": [
+        {
+          "source": "chapter",
+          "selector": "chapter:source-provenance",
+          "reason": "Load the book's primary provenance framework.",
+          "maxTokens": 5000,
+          "required": true,
+          "evidenceAnchorIds": ["anchor-provenance-1"]
+        },
+        {
+          "source": "graph-neighborhood",
+          "selector": "concept:EvidenceAnchor depth:1",
+          "reason": "Find related claims and definitions.",
+          "maxTokens": 2500,
+          "required": false,
+          "evidenceAnchorIds": ["anchor-provenance-1"]
+        },
+        {
+          "source": "passage-search",
+          "selector": "evidence provenance citation",
+          "reason": "Verify conclusions against exact source passages.",
+          "maxTokens": 3000,
+          "required": true,
+          "evidenceAnchorIds": ["anchor-provenance-1"]
+        }
+      ],
+      "usageInstructions": [
+        "Load the chapter before using the graph as synthesis.",
+        "Cite exact evidence for every factual claim.",
+        "Label deductions that combine multiple passages as inference."
+      ]
+    }
+  ],
+  "answerPolicy": {
+    "requireEvidenceAnchors": true,
+    "distinguishInference": true,
+    "refuseWhenUnsupported": true
+  }
+}
