@@ -1,0 +1,43 @@
+{
+  "name": "@scribe-skill/reader",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Local-first, evidence-linked PDF reader for humans and agents",
+  "author": "ScribeSkill contributors",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist-electron/main.mjs",
+  "scripts": {
+    "dev": "vite",
+    "dev:stack": "concurrently -k \"SCRIBE_SKILL_ALLOW_INSECURE_DEV_TOKEN=1 SCRIBE_SKILL_PORT=${SCRIBE_SKILL_PORT:-4317} pnpm --dir ../.. dev:service\" \"VITE_SCRIBE_SKILL_API=http://127.0.0.1:${SCRIBE_SKILL_PORT:-4317} vite --port ${SCRIBE_SKILL_UI_PORT:-5173}\"",
+    "build:desktop-main": "esbuild electron/main.ts --bundle --platform=node --format=esm --outfile=dist-electron/main.mjs --external:electron --external:@napi-rs/canvas && esbuild electron/preload.ts --bundle --platform=node --format=cjs --outfile=dist-electron/preload.cjs --external:electron && cp ../../packages/pdf-workspace/node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs dist-electron/pdf.worker.mjs",
+    "desktop:dev": "pnpm build && pnpm build:desktop-main && electron .",
+    "desktop:build": "pnpm build && pnpm build:desktop-main && electron-builder --dir",
+    "build": "tsc --noEmit -p tsconfig.json && vite build",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@napi-rs/canvas": "^1.0.5",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.0.5",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "concurrently": "^9.2.1",
+    "electron": "^43.4.0",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.2",
+    "vite": "^8.2.1"
+  },
+  "build": {
+    "appId": "app.scribeskill.reader",
+    "productName": "ScribeSkill",
+    "asar": true,
+    "asarUnpack": ["node_modules/@napi-rs/**/*"],
+    "directories": { "output": "release" },
+    "files": ["dist/**/*", "dist-electron/**/*", "package.json"],
+    "mac": { "category": "public.app-category.productivity", "target": ["dir"], "icon": "build/icon.icns" }
+  }
+}

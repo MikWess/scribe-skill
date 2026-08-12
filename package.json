@@ -5,14 +5,17 @@
   "type": "module",
   "packageManager": "pnpm@11.19.0",
   "scripts": {
-    "check": "pnpm typecheck && pnpm test && pnpm fixtures:check",
+    "check": "pnpm typecheck && pnpm test && pnpm fixtures:check && pnpm build:reader",
     "demo:navigation": "node --experimental-strip-types packages/core/examples/navigate.ts",
     "probe:codex": "node --experimental-strip-types packages/core/examples/probe-codex.ts",
     "fixtures:check": "node --experimental-strip-types scripts/check-fixtures.ts",
     "fixtures:generate": "node --experimental-strip-types packages/pdf-workspace/examples/generate-fixtures.ts",
     "pdf:inspect": "node --experimental-strip-types packages/pdf-workspace/examples/inspect.ts",
-    "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test packages/*/test/*.test.ts"
+    "typecheck": "tsc --noEmit && pnpm --filter @scribe-skill/local-service typecheck && pnpm --filter @scribe-skill/reader typecheck",
+    "build:reader": "pnpm --filter @scribe-skill/reader build",
+    "dev:service": "SCRIBE_SKILL_ALLOW_INSECURE_DEV_TOKEN=1 pnpm --filter @scribe-skill/local-service start",
+    "dev:reader": "pnpm --filter @scribe-skill/reader dev",
+    "test": "node --experimental-strip-types --test packages/*/test/*.test.ts apps/*/test/*.test.ts"
   },
   "devDependencies": {
     "@scribe-skill/core": "workspace:*",

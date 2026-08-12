@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 
+import { resolveEvidenceAnchor } from "@scribe-skill/core";
 import { PdfWorkspace, WorkspaceIntegrityError } from "@scribe-skill/pdf-workspace";
 
 async function createDigitalPdf(path: string): Promise<void> {
@@ -132,6 +133,28 @@ test("persists repair history while preserving immutable extracted text", async 
   ]);
 });
 
+test("moves a block atomically without duplicate reading-order positions", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "scribe-skill-reorder-"));
+  const pdfPath = join(root, "reorder.pdf");
+  await createDigitalPdf(pdfPath);
+  let workspace = await PdfWorkspace.open(join(root, "library"));
+  t.after(async () => {
+    try { workspace.close(); } catch { /* already closed */ }
+    await rm(root, { recursive: true, force: true });
+  });
+  const document = await workspace.importPdf(pdfPath);
+  const before = workspace.listBlocks(document.id, 1);
+  const movedId = before[2]!.id;
+  workspace.reorderBlock(movedId, -1);
+  workspace.close();
+  workspace = await PdfWorkspace.open(join(root, "library"));
+  const after = workspace.listBlocks(document.id, 1);
+
+  assert.equal(after[1]?.id, movedId);
+  assert.equal(new Set(after.map(({ currentOrder }) => currentOrder)).size, after.length);
+  assert.match(workspace.listBlockEdits(movedId).at(-1)?.note ?? "", /move earlier/);
+});
+
 test("flags an image-only page for OCR instead of claiming searchable text", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "scribe-skill-ocr-"));
   const pdfPath = join(root, "scanned.pdf");
@@ -197,4 +220,62 @@ test("detects a tampered content-addressed source before reuse or rendering", as
 
   await assert.rejects(() => workspace.importPdf(pdfPath), WorkspaceIntegrityError);
   await assert.rejects(() => workspace.inspectPage(document.id, 1), WorkspaceIntegrityError);
+});
+
+test("persists section edits, reading position, and portable cited notes", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "scribe-skill-reader-state-"));
+  const pdfPath = join(root, "reader.pdf");
+  await createDigitalPdf(pdfPath);
+  let workspace = await PdfWorkspace.open(join(root, "library"));
+  t.after(async () => {
+    try {
+      workspace.close();
+    } catch {
+      // Already closed during the restart step.
+    }
+    await rm(root, { recursive: true, force: true });
+  });
+  const document = await workspace.importPdf(pdfPath);
+  const block = workspace.listBlocks(document.id, 1)[1]!;
+  const section = workspace.updateSection(workspace.listSections(document.id)[0]!.id, {
+    title: "Evidence foundations",
+    startPage: 1,
+    endPage: 2,
+  });
+  workspace.saveProgress(document.id, 1, block.id);
+  workspace.addAnnotation(document.id, block.id, "note", "Use this when validating graph claims.");
+  workspace.close();
+
+  workspace = await PdfWorkspace.open(join(root, "library"));
+  assert.equal(workspace.listSections(document.id)[0]?.title, "Evidence foundations");
+  assert.equal(workspace.listSections(document.id)[0]?.endPage, 2);
+  assert.equal(workspace.getProgress(document.id)?.blockId, block.id);
+  const markdown = workspace.exportAnnotationsMarkdown(document.id);
+  const evidenceExport = workspace.exportAnnotationsEvidence(document.id);
+  assert.match(markdown, /Use this when validating graph claims/);
+  assert.match(markdown, new RegExp(`"id": "anchor-${block.id}"`));
+  assert.match(markdown, new RegExp(`"contentHash": "${block.contentHash}"`));
+  assert.equal(evidenceExport.documentHash, document.documentHash);
+  assert.equal(evidenceExport.annotations[0]?.authorship, "user");
+  assert.deepEqual(evidenceExport.annotations[0]?.evidence, workspace.evidenceForBlock(block.id));
+  assert.equal(evidenceExport.annotations[0]?.sourceText, block.sourceText);
+  assert.equal(section.documentId, document.id);
+
+  const fresh = await PdfWorkspace.open(join(root, "fresh-library"));
+  try {
+    const freshDocument = await fresh.importPdf(pdfPath);
+    await fresh.inspectPage(freshDocument.id, block.pageNumber);
+    const freshBlock = fresh.listBlocks(freshDocument.id).find(({ id }) => id === block.id)!;
+    const resolution = resolveEvidenceAnchor(evidenceExport.annotations[0]!.evidence, {
+      documentHash: freshDocument.documentHash,
+      page: freshBlock.pageNumber,
+      blockId: freshBlock.id,
+      extractionRevision: freshBlock.extractionRevision,
+      content: freshBlock.sourceText,
+      pageImageHash: fresh.evidenceForBlock(freshBlock.id).pageImageHash,
+    });
+    assert.equal(resolution.status, "current");
+  } finally {
+    fresh.close();
+  }
 });

@@ -139,7 +139,7 @@ Use a TypeScript monorepo: a desktop host, React reader UI, optional browser UI,
 | --- | --- | --- |
 | 0 | Foundation: monorepo, license, CI, ADRs, threat model, fixtures, execution policy, capability/run/evidence schemas | Fresh checkout installs, lints, tests, starts locally, and explains each unavailable execution capability. |
 | 1 | Evidence-first PDF workspace: import, hashing, PDF.js extraction/rendering, SQLite migrations, page/block/span anchors, quality/repair model | Import a digital or scanned fixture; view stable anchors and correct/reject uncertain blocks after restart. |
-| 2 | Accessible reader: editable section tree, source/derived annotations, reader UI, persisted progress, selection playback and offline/media controls | Keyboard user repairs order, selects text, resumes exact sentence, and exports portable annotations. |
+| 2 | Accessible reader: editable section guide, provenance-labeled annotations, reader UI, persisted progress, device selection playback and media controls | Keyboard user repairs order, distinguishes source from reading-text repairs, resumes the exact block, and exports portable evidence payloads. |
 | 3 | Narrated-section vertical slice: keychain, capability-aware providers, Codex test adapter, OpenAI/ElevenLabs TTS, scripts, queue/cache | One selected section previews/plays with disclosed timing quality; no-key Codex environment fails only where a capability is absent. |
 | 4 | Audiobook production: alignment, chapter queue, rights attestation, cost ceiling, retry/cancel, QC and versioned audio manifest | A multi-chapter run respects budget, resumes safely, and regenerates only a changed script chunk. |
 | 5 | Provider breadth: Azure, Google, Polly, custom HTTP adapter and capability matrix | Each configured provider works or reports exact feature/limit differences before spend. |
@@ -154,5 +154,5 @@ Use a TypeScript monorepo: a desktop host, React reader UI, optional browser UI,
 1. **Desktop first with an optional browser UI** is selected. The desktop host owns secure storage, filesystem, local service and offline assets; the browser UI is an opt-in read-along/note surface.
 2. **OpenAI and ElevenLabs are the initial voice adapters.** OpenAI validates the default SDK integration; ElevenLabs validates precise timestamp alignment. The UI reports the capability difference.
 3. **ScribeSkill** is selected as the public name: “Turn permitted PDFs into inspectable, cited skills for humans and agents.”
-4. Validate the desktop host choice (Tauri is the working recommendation) against the secure-keychain, local-service, media-session and browser-UI requirements in PR 0.
+4. **Electron is the current desktop host.** Its packaged Node runtime owns the loopback service, SQLite workspace and filesystem access; keep the renderer sandboxed and browser-compatible. Reconsider Tauri only if a production sidecar can preserve that standalone contract.
 5. Validate export compatibility against current agent-skill host conventions. Keep the artifact portable and versioned rather than targeting a single vendor.
