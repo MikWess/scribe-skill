@@ -1,0 +1,47 @@
+{
+  "schemaVersion": "1.0",
+  "skillId": "fixture-evidence-book",
+  "documentHash": "sha256:fixture",
+  "purpose": "Navigate a book about evidence-backed knowledge systems.",
+  "routes": [
+    {
+      "id": "provenance",
+      "description": "Use provenance and evidence anchors when evaluating graph claims.",
+      "triggers": ["provenance", "evidence", "citation", "graph claim"],
+      "tasks": ["verify a claim", "design cited knowledge graphs"],
+      "context": [
+        {
+          "source": "chapter",
+          "selector": "chapter:source-provenance",
+          "reason": "Load the book's primary provenance framework.",
+          "maxTokens": 5000,
+          "required": true
+        },
+        {
+          "source": "graph-neighborhood",
+          "selector": "concept:EvidenceAnchor depth:1",
+          "reason": "Find related claims and definitions.",
+          "maxTokens": 2500,
+          "required": false
+        },
+        {
+          "source": "passage-search",
+          "selector": "evidence provenance citation",
+          "reason": "Verify conclusions against exact source passages.",
+          "maxTokens": 3000,
+          "required": true
+        }
+      ],
+      "usageInstructions": [
+        "Load the chapter before using the graph as synthesis.",
+        "Cite exact evidence for every factual claim.",
+        "Label deductions that combine multiple passages as inference."
+      ]
+    }
+  ],
+  "answerPolicy": {
+    "requireEvidenceAnchors": true,
+    "distinguishInference": true,
+    "refuseWhenUnsupported": true
+  }
+}

@@ -27,4 +27,4 @@ Product planning. Read the [PRD](docs/PRD.md), [70+ source market research](docs
 
 ## License
 
-Apache-2.0 (planned for the first implementation PR).
+MIT.

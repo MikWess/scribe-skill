@@ -25,3 +25,51 @@ export interface RunRequest {
   executionMode: ExecutionMode;
   budget: { maxCostUsd?: number; maxDurationMs?: number; maxTurns?: number };
 }
+
+export type ContextSourceKind =
+  | "chapter"
+  | "passage-search"
+  | "graph-neighborhood"
+  | "figure"
+  | "table";
+
+/**
+ * A navigation guide is the operational part of an exported skill. It tells
+ * an agent which book context to load for a task and how to verify its use.
+ */
+export interface SkillNavigationGuide {
+  schemaVersion: "1.0";
+  skillId: string;
+  documentHash: string;
+  purpose: string;
+  routes: ContextRoute[];
+  answerPolicy: {
+    requireEvidenceAnchors: boolean;
+    distinguishInference: boolean;
+    refuseWhenUnsupported: boolean;
+  };
+}
+
+export interface ContextRoute {
+  id: string;
+  description: string;
+  triggers: string[];
+  tasks: string[];
+  context: ContextRequest[];
+  usageInstructions: string[];
+}
+
+export interface ContextRequest {
+  source: ContextSourceKind;
+  selector: string;
+  reason: string;
+  maxTokens: number;
+  required: boolean;
+}
+
+export interface NavigationDecision {
+  routeIds: string[];
+  context: ContextRequest[];
+  usageInstructions: string[];
+  unmatched: boolean;
+}

@@ -5,6 +5,7 @@
   "packageManager": "pnpm@11.19.0",
   "scripts": {
     "check": "pnpm typecheck && pnpm test",
+    "demo:navigation": "node --experimental-strip-types packages/core/examples/navigate.ts",
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --test packages/*/test/*.test.ts"
   },
