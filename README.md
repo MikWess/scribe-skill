@@ -1,21 +1,21 @@
-# Scribe Sandbox
+# ScribeSkill
 
-Local-first PDF and book inspection for humans and AI agents. Read along with synchronized highlighting, create audiobooks incrementally, ask grounded questions through your own AI provider, and optionally preserve insights in SQLite.
+Turn permitted PDFs into inspectable, cited skills for humans and AI agents. Read along with synchronized highlighting, create audio or a captioned MP4 companion incrementally, ask grounded questions through your own AI provider, and preserve optional insights locally in SQLite.
 
 ## Why it exists
 
-Books are rich source material, but today their reading, listening, retrieval, and agent-use workflows are fragmented. Scribe Sandbox puts them in one inspectable local workspace:
+Books are rich source material, but today their reading, listening, retrieval, and agent-use workflows are fragmented. ScribeSkill puts them in one inspectable local workspace:
 
 - import PDFs (and later EPUB/text)
 - navigate chapters or semantic sections
 - synthesize and play narration while words highlight in sync
 - connect the LLM and voice services you already pay for
 - ask questions with page/section citations and save notes locally
-- let agents build structured audiobook jobs or turn a book into a reusable skill
+- let agents build structured audio/video jobs or turn a book into a reusable, evidence-backed skill
 
 ## Status
 
-Product planning. The delivery sequence and full product requirements are in [docs/PRD.md](docs/PRD.md).
+Product planning. Read the [PRD](docs/PRD.md), [70+ source market research](docs/market-research.md), and [six-profile blind-test findings](docs/blind-test.md).
 
 ## Design principles
 
