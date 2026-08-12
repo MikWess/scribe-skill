@@ -1,0 +1,17 @@
+{
+  "name": "@scribe-skill/pdf-workspace",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@napi-rs/canvas": "^1.0.5",
+    "@scribe-skill/core": "workspace:*",
+    "pdfjs-dist": "^6.2.108"
+  },
+  "devDependencies": {
+    "pdf-lib": "^1.17.1"
+  }
+}

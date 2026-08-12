@@ -17,7 +17,20 @@ The exported skill is a navigation guide, not a static summary. Given a task, it
 
 ## Status
 
-Product planning. Read the [PRD](docs/PRD.md), [70+ source market research](docs/market-research.md), and [six-profile blind-test findings](docs/blind-test.md).
+Early implementation. The evidence/navigation foundation is merged and the local PDF workspace is in progress. Read the [PRD](docs/PRD.md), [70+ source market research](docs/market-research.md), and [six-profile blind-test findings](docs/blind-test.md).
+
+## Developer quick start
+
+Requires Node.js 22+ and pnpm 11.
+
+```sh
+pnpm install
+pnpm check
+pnpm fixtures:generate work/fixtures
+pnpm pdf:inspect work/fixtures/digital-two-column.pdf work/library
+```
+
+The inspection command stores the source by hash, extracts blocks into SQLite, renders page 1 to PNG, reports page quality, and prints source text with evidence coordinates. Image-only PDFs are marked `ocr-required` rather than treated as searchable.
 
 ## Design principles
 

@@ -9,11 +9,14 @@
     "demo:navigation": "node --experimental-strip-types packages/core/examples/navigate.ts",
     "probe:codex": "node --experimental-strip-types packages/core/examples/probe-codex.ts",
     "fixtures:check": "node --experimental-strip-types scripts/check-fixtures.ts",
+    "fixtures:generate": "node --experimental-strip-types packages/pdf-workspace/examples/generate-fixtures.ts",
+    "pdf:inspect": "node --experimental-strip-types packages/pdf-workspace/examples/inspect.ts",
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --test packages/*/test/*.test.ts"
   },
   "devDependencies": {
     "@scribe-skill/core": "workspace:*",
+    "@scribe-skill/pdf-workspace": "workspace:*",
     "@types/node": "^24.0.0",
     "typescript": "^5.9.0"
   }
