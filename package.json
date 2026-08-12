@@ -1,0 +1,16 @@
+{
+  "name": "scribe-skill",
+  "private": true,
+  "version": "0.0.0",
+  "packageManager": "pnpm@11.19.0",
+  "scripts": {
+    "check": "pnpm typecheck && pnpm test",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test packages/*/test/*.test.ts"
+  },
+  "devDependencies": {
+    "@openai/codex-sdk": "^0.147.0",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}
