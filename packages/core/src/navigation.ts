@@ -3,7 +3,11 @@ import type {
   ContextRoute,
   NavigationDecision,
   SkillNavigationGuide,
-} from "./contracts.js";
+} from "./contracts.ts";
+
+export class NavigationGuideValidationError extends Error {
+  override name = "NavigationGuideValidationError";
+}
 
 const HASH_PATTERN = /^sha256:[a-f0-9]{64}$/;
 const SAFE_ID_PATTERN = /^[a-z0-9][a-z0-9._:-]{0,127}$/i;
@@ -49,16 +53,19 @@ function validSelector(request: ContextRequest): boolean {
 
 /** Parse untrusted JSON before it reaches the routing boundary. */
 export function parseNavigationGuide(value: unknown): SkillNavigationGuide {
-  if (!isRecord(value)) throw new Error("Navigation guide must be an object");
-  if (value.schemaVersion !== "1.0") throw new Error("Unsupported navigation schema version");
+  const invalid = (message: string): never => {
+    throw new NavigationGuideValidationError(message);
+  };
+  if (!isRecord(value)) return invalid("Navigation guide must be an object");
+  if (value.schemaVersion !== "1.0") return invalid("Unsupported navigation schema version");
   if (typeof value.skillId !== "string" || !SAFE_ID_PATTERN.test(value.skillId)) {
-    throw new Error("Invalid skill id");
+    return invalid("Invalid skill id");
   }
   if (typeof value.documentHash !== "string" || !HASH_PATTERN.test(value.documentHash)) {
-    throw new Error("Invalid document hash");
+    return invalid("Invalid document hash");
   }
   if (typeof value.purpose !== "string" || value.purpose.trim().length === 0) {
-    throw new Error("Purpose is required");
+    return invalid("Purpose is required");
   }
   if (
     typeof value.defaultMaxTotalTokens !== "number" ||
@@ -66,41 +73,81 @@ export function parseNavigationGuide(value: unknown): SkillNavigationGuide {
     value.defaultMaxTotalTokens <= 0 ||
     value.defaultMaxTotalTokens > MAX_TOTAL_TOKENS
   ) {
-    throw new Error("Invalid default context budget");
+    return invalid("Invalid default context budget");
   }
-  if (!isRecord(value.evidence)) throw new Error("Evidence index is required");
+  if (!isRecord(value.evidence)) return invalid("Evidence index is required");
   for (const [id, anchor] of Object.entries(value.evidence)) {
     if (!isRecord(anchor) || anchor.id !== id || !SAFE_ID_PATTERN.test(id)) {
-      throw new Error(`Invalid evidence entry: ${id}`);
+      return invalid(`Invalid evidence entry: ${id}`);
     }
-    if (anchor.documentHash !== value.documentHash || !HASH_PATTERN.test(String(anchor.contentHash))) {
-      throw new Error(`Evidence ${id} is not bound to the source document`);
+    if (
+      anchor.documentHash !== value.documentHash ||
+      typeof anchor.contentHash !== "string" ||
+      !HASH_PATTERN.test(anchor.contentHash)
+    ) {
+      return invalid(`Evidence ${id} is not bound to the source document`);
     }
     if (!Number.isSafeInteger(anchor.page) || Number(anchor.page) < 1) {
-      throw new Error(`Evidence ${id} has an invalid page`);
+      return invalid(`Evidence ${id} has an invalid page`);
     }
-    if (!isRecord(anchor.characterRange)) throw new Error(`Evidence ${id} has no character range`);
+    if (typeof anchor.blockId !== "string" || !SAFE_ID_PATTERN.test(anchor.blockId)) {
+      return invalid(`Evidence ${id} has an invalid block id`);
+    }
+    if (!Number.isSafeInteger(anchor.extractionRevision) || Number(anchor.extractionRevision) < 1) {
+      return invalid(`Evidence ${id} has an invalid extraction revision`);
+    }
+    if (!isRecord(anchor.characterRange)) return invalid(`Evidence ${id} has no character range`);
     const start = anchor.characterRange.start;
     const end = anchor.characterRange.end;
     if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || Number(start) < 0 || Number(end) <= Number(start)) {
-      throw new Error(`Evidence ${id} has an invalid character range`);
+      return invalid(`Evidence ${id} has an invalid character range`);
     }
   }
   if (!Array.isArray(value.routes) || value.routes.length === 0 || value.routes.length > MAX_ROUTES) {
-    throw new Error("Navigation guide has an invalid route count");
+    return invalid("Navigation guide has an invalid route count");
   }
-  if (!isRecord(value.answerPolicy)) throw new Error("Answer policy is required");
+  for (const [routeIndex, route] of value.routes.entries()) {
+    if (!isRecord(route)) return invalid(`Route ${routeIndex} must be an object`);
+    if (
+      typeof route.id !== "string" ||
+      typeof route.description !== "string" ||
+      !isStringArray(route.triggers) ||
+      !isStringArray(route.tasks) ||
+      !isStringArray(route.usageInstructions) ||
+      !Array.isArray(route.context)
+    ) {
+      return invalid(`Route ${routeIndex} has an invalid shape`);
+    }
+    for (const [requestIndex, request] of route.context.entries()) {
+      if (!isRecord(request)) {
+        return invalid(`Route ${route.id} context ${requestIndex} must be an object`);
+      }
+      if (
+        !["chapter", "passage-search", "graph-neighborhood", "figure", "table"].includes(
+          String(request.source),
+        ) ||
+        typeof request.selector !== "string" ||
+        typeof request.reason !== "string" ||
+        typeof request.maxTokens !== "number" ||
+        typeof request.required !== "boolean" ||
+        !isStringArray(request.evidenceAnchorIds)
+      ) {
+        return invalid(`Route ${route.id} context ${requestIndex} has an invalid shape`);
+      }
+    }
+  }
+  if (!isRecord(value.answerPolicy)) return invalid("Answer policy is required");
   if (
     value.answerPolicy.requireEvidenceAnchors !== true ||
     typeof value.answerPolicy.distinguishInference !== "boolean" ||
     typeof value.answerPolicy.refuseWhenUnsupported !== "boolean"
   ) {
-    throw new Error("Invalid answer policy");
+    return invalid("Invalid answer policy");
   }
 
   const guide = value as unknown as SkillNavigationGuide;
   const errors = validateNavigationGuide(guide);
-  if (errors.length > 0) throw new Error(errors.join("; "));
+  if (errors.length > 0) return invalid(errors.join("; "));
   return guide;
 }
 

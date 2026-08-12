@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { navigateSkill, parseNavigationGuide, validateNavigationGuide } from "../src/navigation.ts";
+import {
+  navigateSkill,
+  NavigationGuideValidationError,
+  parseNavigationGuide,
+  validateNavigationGuide,
+} from "../src/navigation.ts";
 import guide from "../fixtures/navigation-guide.json" with { type: "json" };
 import type { SkillNavigationGuide } from "../src/contracts.ts";
 
@@ -52,4 +57,44 @@ test("bounds route count and total context allocation", () => {
   assert.equal(decision.routeIds.length, 2);
   assert.equal(decision.allocatedTokens, 2_000);
   assert.equal(decision.candidates.filter(({ selected }) => selected).length, 2);
+});
+
+test("malformed route, context, evidence, and policy fail with controlled validation errors", () => {
+  const cases: unknown[] = [
+    { ...structuredClone(guide), routes: [null] },
+    {
+      ...structuredClone(guide),
+      routes: [{ ...structuredClone(guide.routes[0]!), context: [null] }],
+    },
+    { ...structuredClone(guide), evidence: { broken: null } },
+    { ...structuredClone(guide), answerPolicy: null },
+  ];
+
+  for (const value of cases) {
+    assert.throws(() => parseNavigationGuide(value), NavigationGuideValidationError);
+  }
+});
+
+test("arbitrary JSON never leaks a raw runtime error from the parser", () => {
+  let seed = 0x5c12beef;
+  const next = () => ((seed = (seed * 1_664_525 + 1_013_904_223) >>> 0) / 0x1_0000_0000);
+  const arbitrary = (depth: number): unknown => {
+    const kind = Math.floor(next() * (depth > 2 ? 4 : 6));
+    if (kind === 0) return null;
+    if (kind === 1) return next() > 0.5;
+    if (kind === 2) return Math.floor(next() * 1_000);
+    if (kind === 3) return `value-${Math.floor(next() * 1_000)}`;
+    if (kind === 4) return Array.from({ length: Math.floor(next() * 4) }, () => arbitrary(depth + 1));
+    return Object.fromEntries(
+      Array.from({ length: Math.floor(next() * 4) }, (_, index) => [`key-${index}`, arbitrary(depth + 1)]),
+    );
+  };
+
+  for (let index = 0; index < 500; index += 1) {
+    try {
+      parseNavigationGuide(arbitrary(0));
+    } catch (error) {
+      assert.ok(error instanceof NavigationGuideValidationError);
+    }
+  }
 });

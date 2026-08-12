@@ -1,4 +1,4 @@
-import type { SkillManifest } from "./contracts.js";
+import type { SkillManifest } from "./contracts.ts";
 import { sha256 } from "./evidence.ts";
 
 export function createSkillManifest(input: {

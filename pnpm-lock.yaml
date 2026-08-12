@@ -8,6 +8,9 @@ importers:
 
   .:
     devDependencies:
+      '@scribe-skill/core':
+        specifier: workspace:*
+        version: link:packages/core
       '@types/node':
         specifier: ^24.0.0
         version: 24.13.3

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import type { ContextPayload, EvidenceAnchor } from "./contracts.js";
+import type { ContextPayload, EvidenceAnchor } from "./contracts.ts";
 
 export interface CurrentEvidenceLocation {
   documentHash: string;

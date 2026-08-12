@@ -1,4 +1,4 @@
-import type { EgressRequest, ExecutionPolicy } from "./contracts.js";
+import type { EgressRequest, ExecutionPolicy } from "./contracts.ts";
 
 export interface EgressDecision {
   allowed: boolean;

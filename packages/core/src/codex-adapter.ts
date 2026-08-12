@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
-import type { Capability } from "./contracts.js";
+import type { Capability } from "./contracts.ts";
 
 export interface CodexAdapterOptions {
   /** Injected for tests; production uses the Codex SDK's local CLI bridge. */
