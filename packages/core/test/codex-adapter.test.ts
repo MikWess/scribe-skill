@@ -7,12 +7,21 @@ test("reports a usable Codex session without an API-key fallback", async () => {
   const result = await getCodexCapability({
     createClient: () => ({}) as never,
     probeLogin: async () => true,
+    smokeTest: async () => true,
   });
 
   assert.deepEqual(result, {
     id: "codex-session",
     state: "available",
     executionModes: ["codex-session"],
+    requiredAction: undefined,
+    checks: {
+      sdkInstalled: true,
+      authenticated: true,
+      smokeTested: true,
+      workspaceAccess: true,
+      networkDisabled: true,
+    },
   });
 });
 
@@ -35,4 +44,14 @@ test("reports unavailable when the Codex SDK cannot resolve its runtime", async 
 
   assert.equal(result.state, "unavailable");
   assert.match(result.requiredAction ?? "", /Install/);
+});
+
+test("keeps an authenticated adapter unverified until its bounded smoke test runs", async () => {
+  const result = await getCodexCapability({
+    createClient: () => ({}) as never,
+    probeLogin: async () => true,
+  });
+
+  assert.equal(result.state, "unverified");
+  assert.equal(result.checks?.smokeTested, false);
 });

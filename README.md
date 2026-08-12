@@ -13,6 +13,8 @@ Books are rich source material, but today their reading, listening, retrieval, a
 - ask questions with page/section citations and save notes locally
 - let agents build structured audio/video jobs or turn a book into a reusable, evidence-backed skill
 
+The exported skill is a navigation guide, not a static summary. Given a task, it selects the most relevant chapter context, graph neighborhood, figures/tables, and exact passages within a bounded context budget. It also tells the agent how to use that context, when it is making an inference, and when the book does not support an answer.
+
 ## Status
 
 Product planning. Read the [PRD](docs/PRD.md), [70+ source market research](docs/market-research.md), and [six-profile blind-test findings](docs/blind-test.md).

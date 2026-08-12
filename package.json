@@ -2,15 +2,17 @@
   "name": "scribe-skill",
   "private": true,
   "version": "0.0.0",
+  "type": "module",
   "packageManager": "pnpm@11.19.0",
   "scripts": {
-    "check": "pnpm typecheck && pnpm test",
+    "check": "pnpm typecheck && pnpm test && pnpm fixtures:check",
     "demo:navigation": "node --experimental-strip-types packages/core/examples/navigate.ts",
+    "probe:codex": "node --experimental-strip-types packages/core/examples/probe-codex.ts",
+    "fixtures:check": "node --experimental-strip-types scripts/check-fixtures.ts",
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --test packages/*/test/*.test.ts"
   },
   "devDependencies": {
-    "@openai/codex-sdk": "^0.147.0",
     "@types/node": "^24.0.0",
     "typescript": "^5.9.0"
   }
