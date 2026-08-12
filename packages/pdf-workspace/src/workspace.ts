@@ -69,6 +69,32 @@ export interface BlockEdit {
   createdAt: string;
 }
 
+export interface DocumentSection {
+  id: string;
+  documentId: string;
+  title: string;
+  startPage: number;
+  endPage: number;
+  order: number;
+}
+
+export interface ReadingProgress {
+  documentId: string;
+  pageNumber: number;
+  blockId?: string;
+  updatedAt: string;
+}
+
+export interface Annotation {
+  id: number;
+  documentId: string;
+  blockId: string;
+  kind: "note" | "highlight";
+  authorship: "user" | "source" | "model";
+  content: string;
+  createdAt: string;
+}
+
 interface RawBlock {
   text: string;
   order: number;
@@ -157,7 +183,7 @@ export class PdfWorkspace {
 
   private migrate(): void {
     const version = Number(this.database.prepare("PRAGMA user_version").get()?.user_version ?? 0);
-    if (version > 2) throw new Error(`Workspace schema ${version} is newer than this app supports`);
+    if (version > 4) throw new Error(`Workspace schema ${version} is newer than this app supports`);
     if (version === 0) {
       this.database.exec(`
         BEGIN;
@@ -210,12 +236,65 @@ export class PdfWorkspace {
           note TEXT NOT NULL,
           created_at TEXT NOT NULL
         );
-        PRAGMA user_version = 2;
+        CREATE TABLE sections (
+          id TEXT PRIMARY KEY,
+          document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+          title TEXT NOT NULL,
+          start_page INTEGER NOT NULL,
+          end_page INTEGER NOT NULL,
+          section_order INTEGER NOT NULL
+        );
+        CREATE TABLE reading_progress (
+          document_id TEXT PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
+          page_number INTEGER NOT NULL,
+          block_id TEXT,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE annotations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+          block_id TEXT NOT NULL REFERENCES blocks(id) ON DELETE CASCADE,
+          kind TEXT NOT NULL CHECK (kind IN ('note', 'highlight')),
+          authorship TEXT NOT NULL CHECK (authorship IN ('user', 'source', 'model')) DEFAULT 'user',
+          content TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        PRAGMA user_version = 4;
         COMMIT;
       `);
     }
     if (version === 1) {
       this.database.exec("ALTER TABLE pages ADD COLUMN render_hash TEXT; PRAGMA user_version = 2;");
+    }
+    if (version > 0 && version < 3) {
+      this.database.exec(`
+        CREATE TABLE IF NOT EXISTS sections (
+          id TEXT PRIMARY KEY,
+          document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+          title TEXT NOT NULL,
+          start_page INTEGER NOT NULL,
+          end_page INTEGER NOT NULL,
+          section_order INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS reading_progress (
+          document_id TEXT PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
+          page_number INTEGER NOT NULL,
+          block_id TEXT,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS annotations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+          block_id TEXT NOT NULL REFERENCES blocks(id) ON DELETE CASCADE,
+          kind TEXT NOT NULL CHECK (kind IN ('note', 'highlight')),
+          content TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        PRAGMA user_version = 3;
+      `);
+    }
+    if (version > 0 && version < 4) {
+      this.database.exec("ALTER TABLE annotations ADD COLUMN authorship TEXT NOT NULL DEFAULT 'user' CHECK (authorship IN ('user', 'source', 'model')); PRAGMA user_version = 4;");
     }
   }
 
@@ -300,6 +379,12 @@ export class PdfWorkspace {
               revision,
             );
         }
+        this.database
+          .prepare(
+            `INSERT INTO sections (id, document_id, title, start_page, end_page, section_order)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+          )
+          .run(`${id}-section-p${pageNumber}`, id, `Page ${pageNumber}`, pageNumber, pageNumber, pageNumber - 1);
       }
       this.database.exec("COMMIT");
     } catch (error) {
@@ -461,6 +546,50 @@ export class PdfWorkspace {
     return normalizeBlock(this.database.prepare("SELECT * FROM blocks WHERE id = ?").get(blockId)!);
   }
 
+  reorderBlock(blockId: string, direction: -1 | 1): ExtractedBlock[] {
+    const currentRow = this.database.prepare("SELECT * FROM blocks WHERE id = ?").get(blockId);
+    if (!currentRow) throw new Error(`Unknown block: ${blockId}`);
+    const current = normalizeBlock(currentRow);
+    const siblings = this.listBlocks(current.documentId, current.pageNumber);
+    const index = siblings.findIndex(({ id }) => id === blockId);
+    const targetIndex = index + direction;
+    if (targetIndex < 0 || targetIndex >= siblings.length) return siblings;
+    const target = siblings[targetIndex]!;
+    const createdAt = new Date().toISOString();
+
+    this.database.exec("BEGIN");
+    try {
+      for (const [block, nextOrder] of [
+        [current, target.currentOrder],
+        [target, current.currentOrder],
+      ] as const) {
+        this.database
+          .prepare(
+            `INSERT INTO block_edits
+             (block_id, previous_text, next_text, previous_order, next_order, previous_status, next_status, note, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            block.id,
+            block.currentText,
+            block.currentText,
+            block.currentOrder,
+            nextOrder,
+            block.status,
+            block.status,
+            direction < 0 ? "Reader move earlier" : "Reader move later",
+            createdAt,
+          );
+        this.database.prepare("UPDATE blocks SET current_order = ? WHERE id = ?").run(nextOrder, block.id);
+      }
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+    return this.listBlocks(current.documentId, current.pageNumber);
+  }
+
   listBlockEdits(blockId: string): BlockEdit[] {
     return this.database
       .prepare("SELECT * FROM block_edits WHERE block_id = ? ORDER BY id")
@@ -501,6 +630,153 @@ export class PdfWorkspace {
       contentHash: block.contentHash,
       pageImageHash: row.render_hash ? String(row.render_hash) : undefined,
       boundingBox: block.boundingBox,
+    };
+  }
+
+  listSections(documentId: string): DocumentSection[] {
+    return this.database
+      .prepare("SELECT * FROM sections WHERE document_id = ? ORDER BY section_order")
+      .all(documentId)
+      .map((row) => ({
+        id: String(row.id),
+        documentId: String(row.document_id),
+        title: String(row.title),
+        startPage: Number(row.start_page),
+        endPage: Number(row.end_page),
+        order: Number(row.section_order),
+      }));
+  }
+
+  updateSection(
+    sectionId: string,
+    patch: Partial<Pick<DocumentSection, "title" | "startPage" | "endPage" | "order">>,
+  ): DocumentSection {
+    const row = this.database.prepare("SELECT * FROM sections WHERE id = ?").get(sectionId);
+    if (!row) throw new Error(`Unknown section: ${sectionId}`);
+    const current = this.listSections(String(row.document_id)).find(({ id }) => id === sectionId)!;
+    const next = { ...current, ...patch };
+    const document = this.getDocument(next.documentId)!;
+    if (!next.title.trim()) throw new Error("Section title is required");
+    if (
+      !Number.isSafeInteger(next.startPage) ||
+      !Number.isSafeInteger(next.endPage) ||
+      next.startPage < 1 ||
+      next.endPage < next.startPage ||
+      next.endPage > document.pageCount
+    ) {
+      throw new Error("Section page range is outside the document");
+    }
+    this.database
+      .prepare(
+        "UPDATE sections SET title = ?, start_page = ?, end_page = ?, section_order = ? WHERE id = ?",
+      )
+      .run(next.title.trim(), next.startPage, next.endPage, next.order, sectionId);
+    return next;
+  }
+
+  saveProgress(documentId: string, pageNumber: number, blockId?: string): ReadingProgress {
+    const document = this.getDocument(documentId);
+    if (!document || pageNumber < 1 || pageNumber > document.pageCount) throw new Error("Invalid reading position");
+    if (blockId) {
+      const block = this.database.prepare("SELECT document_id FROM blocks WHERE id = ?").get(blockId);
+      if (!block || String(block.document_id) !== documentId) throw new Error("Progress block is outside the document");
+    }
+    const updatedAt = new Date().toISOString();
+    this.database
+      .prepare(
+        `INSERT INTO reading_progress (document_id, page_number, block_id, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(document_id) DO UPDATE SET
+           page_number = excluded.page_number, block_id = excluded.block_id, updated_at = excluded.updated_at`,
+      )
+      .run(documentId, pageNumber, blockId ?? null, updatedAt);
+    return { documentId, pageNumber, blockId, updatedAt };
+  }
+
+  getProgress(documentId: string): ReadingProgress | undefined {
+    const row = this.database.prepare("SELECT * FROM reading_progress WHERE document_id = ?").get(documentId);
+    return row
+      ? {
+          documentId: String(row.document_id),
+          pageNumber: Number(row.page_number),
+          blockId: row.block_id ? String(row.block_id) : undefined,
+          updatedAt: String(row.updated_at),
+        }
+      : undefined;
+  }
+
+  addAnnotation(
+    documentId: string,
+    blockId: string,
+    kind: Annotation["kind"],
+    content: string,
+    authorship: Annotation["authorship"] = "user",
+  ): Annotation {
+    const block = this.database.prepare("SELECT document_id FROM blocks WHERE id = ?").get(blockId);
+    if (!block || String(block.document_id) !== documentId) throw new Error("Annotation block is outside the document");
+    if (!content.trim()) throw new Error("Annotation content is required");
+    const createdAt = new Date().toISOString();
+    const result = this.database
+      .prepare(
+        "INSERT INTO annotations (document_id, block_id, kind, authorship, content, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .run(documentId, blockId, kind, authorship, content.trim(), createdAt);
+    return { id: Number(result.lastInsertRowid), documentId, blockId, kind, authorship, content: content.trim(), createdAt };
+  }
+
+  listAnnotations(documentId: string): Annotation[] {
+    return this.database
+      .prepare("SELECT * FROM annotations WHERE document_id = ? ORDER BY id")
+      .all(documentId)
+      .map((row) => ({
+        id: Number(row.id),
+        documentId: String(row.document_id),
+        blockId: String(row.block_id),
+        kind: String(row.kind) as Annotation["kind"],
+        authorship: String(row.authorship) as Annotation["authorship"],
+        content: String(row.content),
+        createdAt: String(row.created_at),
+      }));
+  }
+
+  exportAnnotationsMarkdown(documentId: string): string {
+    const document = this.getDocument(documentId);
+    if (!document) throw new Error(`Unknown document: ${documentId}`);
+    const blocks = new Map(this.listBlocks(documentId).map((block) => [block.id, block]));
+    const lines = [`# Notes — ${document.originalName}`, "", `Source: ${document.documentHash}`, ""];
+    for (const annotation of this.listAnnotations(documentId)) {
+      const block = blocks.get(annotation.blockId)!;
+      lines.push(
+        `## Page ${block.pageNumber} · ${annotation.authorship} ${annotation.kind}`,
+        "",
+        `> ${block.sourceText.replaceAll("\n", " ")}`,
+        "",
+        annotation.content,
+        "",
+        "```json scribe-skill-evidence",
+        JSON.stringify(this.evidenceForBlock(block.id), null, 2),
+        "```",
+        "",
+      );
+    }
+    return `${lines.join("\n")}\n`;
+  }
+
+  exportAnnotationsEvidence(documentId: string): {
+    schemaVersion: 1;
+    documentHash: string;
+    annotations: Array<Annotation & { sourceText: string; evidence: EvidenceAnchor }>;
+  } {
+    const document = this.getDocument(documentId);
+    if (!document) throw new Error(`Unknown document: ${documentId}`);
+    const blocks = new Map(this.listBlocks(documentId).map((block) => [block.id, block]));
+    return {
+      schemaVersion: 1,
+      documentHash: document.documentHash,
+      annotations: this.listAnnotations(documentId).map((annotation) => {
+        const block = blocks.get(annotation.blockId)!;
+        return { ...annotation, sourceText: block.sourceText, evidence: this.evidenceForBlock(block.id) };
+      }),
     };
   }
 }

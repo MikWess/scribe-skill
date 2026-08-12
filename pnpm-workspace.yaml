@@ -3,7 +3,9 @@ packages:
   - packages/*
 
 allowBuilds:
+  electron-winstaller: false
   esbuild: set this to true or false
 
 onlyBuiltDependencies:
+  - electron
   - esbuild

@@ -1,0 +1,16 @@
+{
+  "name": "@scribe-skill/local-service",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node --experimental-strip-types src/server.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@scribe-skill/pdf-workspace": "workspace:*"
+  },
+  "devDependencies": {
+    "pdf-lib": "^1.17.1"
+  }
+}

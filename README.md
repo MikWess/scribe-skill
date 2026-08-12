@@ -17,7 +17,7 @@ The exported skill is a navigation guide, not a static summary. Given a task, it
 
 ## Status
 
-Early implementation. The evidence/navigation foundation is merged and the local PDF workspace is in progress. Read the [PRD](docs/PRD.md), [70+ source market research](docs/market-research.md), and [six-profile blind-test findings](docs/blind-test.md).
+Early implementation. The evidence/navigation foundation and deterministic local PDF workspace are merged; the accessible reader is the current pull-request slice. Read the [PRD](docs/PRD.md), [70+ source market research](docs/market-research.md), and [six-profile blind-test findings](docs/blind-test.md).
 
 ## Developer quick start
 
@@ -28,9 +28,12 @@ pnpm install
 pnpm check
 pnpm fixtures:generate work/fixtures
 pnpm pdf:inspect work/fixtures/digital-two-column.pdf work/library
+pnpm --filter @scribe-skill/reader dev:stack
 ```
 
 The inspection command stores the source by hash, extracts blocks into SQLite, renders page 1 to PNG, reports page quality, and prints source text with evidence coordinates. Image-only PDFs are marked `ocr-required` rather than treated as searchable.
+
+The reader command starts the loopback-only local service and browser UI at `http://localhost:5173`. It uses an explicitly enabled development token; direct service use requires `SCRIBE_SKILL_TOKEN`. The Electron desktop host starts the same service itself on a random port with an ephemeral token, so `pnpm --filter @scribe-skill/reader desktop:dev` needs no separate server process. Build an unpacked desktop app for the current platform with `pnpm --filter @scribe-skill/reader desktop:build`.
 
 ## Design principles
 
