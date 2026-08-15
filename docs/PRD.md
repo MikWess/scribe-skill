@@ -56,9 +56,11 @@ Readers who want to move fluidly between page, audio, note-taking, and deep inqu
 
 ### C. Create an audiobook
 
-1. User or agent selects chapters/sections, voice, pronunciation rules, and output format.
-2. A job queue produces audio and alignment incrementally with pause/retry/cost estimates.
-3. The app exports chapter files, metadata, and optionally a merged audiobook manifest.
+1. User or agent selects chapters/sections, voice, pronunciation rules, output format, rights scope, and hard character/request/cost ceilings.
+2. A no-key local dry run freezes cited source revisions, provider host, deterministic parts, quality blockers, a conservative user-supplied planning rate, and an immutable confirmation hash before egress.
+3. A persisted queue produces audio and alignment incrementally with pause/cancel/explicit retry; content-addressed cache reuse prevents unchanged parts from being synthesized twice.
+4. Synthesis enters review rather than claiming completion. The operator inspects per-part integrity/timing disclosures and records a reason for any warning waiver.
+5. The app exports independent chapter parts, a versioned relative-path manifest, approval/rights/QC records, and checksums. Commercial mastering or merged formats are later opt-in stages.
 
 ### D. Agent workflow / book-to-skill
 
@@ -141,7 +143,7 @@ Use a TypeScript monorepo: a desktop host, React reader UI, optional browser UI,
 | 1 | Evidence-first PDF workspace: import, hashing, PDF.js extraction/rendering, SQLite migrations, page/block/span anchors, quality/repair model | Import a digital or scanned fixture; view stable anchors and correct/reject uncertain blocks after restart. |
 | 2 | Accessible reader: editable section guide, provenance-labeled annotations, reader UI, persisted progress, device selection playback and media controls | Keyboard user repairs order, distinguishes source from reading-text repairs, resumes the exact block, and exports portable evidence payloads. |
 | 3 | Narrated-section vertical slice: keychain, capability-aware providers, Codex test adapter, OpenAI/ElevenLabs TTS, scripts, queue/cache | One selected section previews/plays with disclosed timing quality; no-key Codex environment fails only where a capability is absent. |
-| 4 | Audiobook production: alignment, chapter queue, rights attestation, cost ceiling, retry/cancel, QC and versioned audio manifest | A multi-chapter run respects budget, resumes safely, and regenerates only a changed script chunk. |
+| 4 | Audiobook production: immutable dry run, chapter queue, rights receipt, conservative cost ceiling, pause/cancel/explicit retry, source-drift stop, structural audio QC and versioned checksummed package | A fake-provider multi-chapter run makes no unapproved call, pauses/resumes without duplicates, rejects source drift and corrupt audio, regenerates only the failed part, and atomically exports only after review. A replacement plan reuses unchanged audio identities. |
 | 5 | Provider breadth: Azure, Google, Polly, custom HTTP adapter and capability matrix | Each configured provider works or reports exact feature/limit differences before spend. |
 | 6 | Grounded inspection: local/OpenAI-compatible retrieval, cited Q&A, insights, figure/table citations, privacy receipts | Answers open exact evidence and preserve OCR confidence; Offline mode makes zero network calls. |
 | 7 | Agent integration: local CLI/API/MCP, loopback auth, Codex-session adapter, skills validation | An agent completes import → cited search → validated export without UI. |

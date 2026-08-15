@@ -11,6 +11,9 @@ importers:
       '@scribe-skill/audio':
         specifier: workspace:*
         version: link:packages/audio
+      '@scribe-skill/audiobook':
+        specifier: workspace:*
+        version: link:packages/audiobook
       '@scribe-skill/core':
         specifier: workspace:*
         version: link:packages/core
@@ -29,6 +32,9 @@ importers:
       '@scribe-skill/audio':
         specifier: workspace:*
         version: link:../../packages/audio
+      '@scribe-skill/audiobook':
+        specifier: workspace:*
+        version: link:../../packages/audiobook
       '@scribe-skill/core':
         specifier: workspace:*
         version: link:../../packages/core
@@ -79,6 +85,15 @@ importers:
 
   packages/audio:
     dependencies:
+      '@scribe-skill/core':
+        specifier: workspace:*
+        version: link:../core
+
+  packages/audiobook:
+    dependencies:
+      '@scribe-skill/audio':
+        specifier: workspace:*
+        version: link:../audio
       '@scribe-skill/core':
         specifier: workspace:*
         version: link:../core

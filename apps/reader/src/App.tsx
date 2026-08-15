@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { NarrationPanel } from "./NarrationPanel.js";
+import { AudiobookPanel } from "./AudiobookPanel.js";
 
 declare global {
   interface Window {
@@ -483,7 +484,8 @@ export function App() {
                 <label>To<input key={`${activeSection.id}-to`} type="number" min="1" max={document.pageCount} defaultValue={activeSection.endPage} onBlur={(event) => void updateSection({ endPage: Number(event.target.value) })} /></label>
               </div>
             </fieldset>
-            <NarrationPanel section={activeSection} documentName={document.originalName} requestJson={request} fetchArtifact={fetchAudioArtifact} /></>
+            <NarrationPanel section={activeSection} documentName={document.originalName} requestJson={request} fetchArtifact={fetchAudioArtifact} />
+            <AudiobookPanel documentId={document.id} sections={sections} activeSection={activeSection} requestJson={request} /></>
           )}
 
           <div className="block-list" aria-label="Extracted reading order">

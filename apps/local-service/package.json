@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@scribe-skill/audio": "workspace:*",
+    "@scribe-skill/audiobook": "workspace:*",
     "@scribe-skill/core": "workspace:*",
     "@scribe-skill/pdf-workspace": "workspace:*"
   },

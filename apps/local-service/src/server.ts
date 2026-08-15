@@ -11,7 +11,9 @@ import {
   createNarrationScript,
 } from "@scribe-skill/audio";
 import type { AudioJob, NarrationRequest, VoiceCapability, VoiceProviderRegistry } from "@scribe-skill/audio";
-import { getCodexCapability } from "@scribe-skill/core";
+import { AudiobookWorkspace } from "@scribe-skill/audiobook";
+import type { CreateAudiobookPlanInput, ProductionChunk } from "@scribe-skill/audiobook";
+import { getCodexCapability, sha256 } from "@scribe-skill/core";
 import type { Capability, EvidenceAnchor } from "@scribe-skill/core";
 import { PdfWorkspace } from "@scribe-skill/pdf-workspace";
 
@@ -68,6 +70,17 @@ async function rawBody(request: IncomingMessage, limit = 100 * 1024 * 1024): Pro
   return Buffer.concat(chunks);
 }
 
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
 export async function startLocalService(options: LocalServiceOptions): Promise<LocalServiceHandle> {
 const host = options.host ?? "127.0.0.1";
 const requestedPort = options.port ?? 0;
@@ -76,12 +89,18 @@ const token = options.token;
 const allowedOrigins = new Set(options.allowedOrigins ?? []);
 const workspace = await PdfWorkspace.open(resolve(options.workspacePath));
 const audio = await AudioWorkspace.open(join(workspace.rootPath, "audio"));
+const audiobooks = await AudiobookWorkspace.open(join(workspace.rootPath, "audio", "production"), audio);
 const resolveProviderKey = options.resolveProviderKey ?? (async (provider) =>
   provider === "openai" ? process.env.OPENAI_API_KEY : process.env.ELEVENLABS_API_KEY);
 let codexCapabilityPromise: Promise<Capability> | undefined;
 const resolveCodexCapability = () =>
   codexCapabilityPromise ??= (options.resolveCodexCapability ?? (() => getCodexCapability()))();
-let draining = false;
+let processingTail: Promise<void> = Promise.resolve();
+
+function scheduleAudioWork(task: () => Promise<void>): void {
+  const scheduled = processingTail.then(task, task);
+  processingTail = scheduled.catch(() => undefined);
+}
 
 async function providerRegistry(): Promise<VoiceProviderRegistry> {
   if (options.createProviderRegistry) {
@@ -121,15 +140,11 @@ async function capabilities(): Promise<{ voices: VoiceCapability[]; codex: Capab
 }
 
 async function drainAudioQueue(): Promise<void> {
-  if (draining) return;
-  draining = true;
-  try {
+  scheduleAudioWork(async () => {
     while (await audio.processNext(await providerRegistry())) {
       // Keep draining until the atomic claim reports that no queued job remains.
     }
-  } finally {
-    draining = false;
-  }
+  });
 }
 
 function scriptForSection(sectionId: string, readingText?: string, revision = 1) {
@@ -147,13 +162,30 @@ function scriptForSection(sectionId: string, readingText?: string, revision = 1)
   return createNarrationScript(section.id, sourceText, readingText ?? defaultReadingText, evidence, revision);
 }
 
+function sourceQuality(documentId: string, startPage: number, endPage: number): "good" | "review-needed" | "ocr-required" {
+  const qualities = workspace.listPages(documentId)
+    .filter(({ pageNumber }) => pageNumber >= startPage && pageNumber <= endPage)
+    .map(({ quality }) => quality);
+  if (qualities.includes("ocr-required")) return "ocr-required";
+  if (qualities.includes("review-needed")) return "review-needed";
+  return "good";
+}
+
+function currentChunkSource(chunk: ProductionChunk): boolean {
+  try {
+    return scriptForSection(chunk.sectionId).id === chunk.sourceScriptId;
+  } catch {
+    return false;
+  }
+}
+
 const server = createServer(async (request, response) => {
   try {
     const origin = typeof request.headers.origin === "string" ? request.headers.origin : undefined;
     if (origin && !allowedOrigins.has(origin)) return send(response, 403, { error: "Origin is not allowed" });
     if (origin) response.setHeader("access-control-allow-origin", origin);
     response.setHeader("vary", "Origin");
-    response.setHeader("access-control-allow-headers", "content-type,x-scribe-token");
+    response.setHeader("access-control-allow-headers", "content-type,x-scribe-token,idempotency-key");
     response.setHeader("access-control-allow-methods", "GET,POST,PATCH,PUT,OPTIONS");
     if (request.method === "OPTIONS") return send(response, 204, "", "text/plain");
     if (request.headers["x-scribe-token"] !== token) return send(response, 401, { error: "Unauthorized" });
@@ -229,6 +261,130 @@ const server = createServer(async (request, response) => {
     }
     if (request.method === "PATCH" && sectionMatch) {
       return send(response, 200, workspace.updateSection(sectionMatch[1]!, await body(request)));
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/audiobooks") {
+      return send(response, 200, audiobooks.list());
+    }
+    if (request.method === "POST" && url.pathname === "/api/audiobooks/plans") {
+      const input = await body(request);
+      const idempotencyKey = typeof request.headers["idempotency-key"] === "string" ? request.headers["idempotency-key"] : "";
+      if (!idempotencyKey.trim()) return send(response, 400, { error: "Idempotency-Key header is required" });
+      if (typeof input.documentId !== "string") return send(response, 400, { error: "Document is required" });
+      if (input.provider !== "openai" && input.provider !== "elevenlabs") return send(response, 400, { error: "Provider must be openai or elevenlabs" });
+      if (!Array.isArray(input.sectionIds) || input.sectionIds.length === 0 || input.sectionIds.some((id) => typeof id !== "string")) {
+        return send(response, 400, { error: "Select at least one section" });
+      }
+      if (new Set(input.sectionIds).size !== input.sectionIds.length) {
+        return send(response, 400, { error: "Each selected section must be unique" });
+      }
+      if (typeof input.voice !== "string" || !input.voice.trim()) return send(response, 400, { error: "Voice is required" });
+      const document = workspace.getDocument(input.documentId);
+      if (!document) return send(response, 404, { error: "Document is not in this workspace" });
+      await workspace.verifyDocumentAsset(document.id);
+      const requestedSections = input.sectionIds.map((sectionId) => workspace.getSection(String(sectionId)));
+      if (requestedSections.some((section) => !section || section.documentId !== document.id)) {
+        return send(response, 400, { error: "Every selected section must belong to the document" });
+      }
+      const qualityApproved = new Set(Array.isArray(input.qualityApprovedSectionIds) ? input.qualityApprovedSectionIds.filter((id): id is string => typeof id === "string") : []);
+      const providers = await providerRegistry();
+      const capability = providers[input.provider]?.capability();
+      if (!capability) return send(response, 400, { error: "Provider is not supported" });
+      const requestedChunkSize = Number(input.maxChunkCharacters ?? (input.provider === "openai" ? 4000 : 10_000));
+      if (!Number.isSafeInteger(requestedChunkSize) || requestedChunkSize < 32) return send(response, 400, { error: "Chunk size must be an integer of at least 32" });
+      if (capability.maxCharacters && requestedChunkSize > capability.maxCharacters) {
+        return send(response, 422, { error: `Chunk size exceeds the provider limit of ${capability.maxCharacters.toLocaleString()} characters` });
+      }
+      if (input.provider === "elevenlabs" && input.format === "wav") return send(response, 422, { error: "ElevenLabs timestamped narration currently exports MP3 only" });
+      const pricingRate = Number(input.usdPerMillionCharacters);
+      const maxCostUsd = Number(input.maxCostUsd);
+      const maxCharacters = Number(input.maxCharacters);
+      const maxProviderRequests = Number(input.maxProviderRequests);
+      const pronunciation = Array.isArray(input.pronunciation)
+        ? input.pronunciation.map((rule) => {
+            const record = rule as Record<string, unknown>;
+            return { source: String(record.source ?? ""), spoken: String(record.spoken ?? "") };
+          })
+        : [];
+      const planInput: CreateAudiobookPlanInput = {
+        documentId: document.id,
+        documentHash: document.documentHash,
+        extractionRevision: document.extractionRevision,
+        sections: requestedSections.map((section) => ({
+          sectionId: section!.id,
+          title: section!.title,
+          startPage: section!.startPage,
+          endPage: section!.endPage,
+          quality: sourceQuality(document.id, section!.startPage, section!.endPage),
+          qualityApproved: qualityApproved.has(section!.id),
+          script: scriptForSection(section!.id),
+        })),
+        provider: input.provider,
+        providerHost: input.provider === "openai" ? "api.openai.com" : "api.elevenlabs.io",
+        voice: input.voice.trim(),
+        model: typeof input.model === "string" && input.model.trim() ? input.model.trim() : undefined,
+        instructions: typeof input.instructions === "string" && input.instructions.trim() ? input.instructions.trim() : undefined,
+        format: input.format === "wav" ? "wav" : "mp3",
+        timingQuality: capability.timingQuality,
+        maxChunkCharacters: requestedChunkSize,
+        pricing: {
+          kind: "user-supplied-per-million-characters",
+          usdPerMillionCharacters: pricingRate,
+          checkedAt: new Date().toISOString(),
+          note: "Conservative user-supplied planning rate; provider billing may use a different unit and must be verified by the operator.",
+        },
+        budget: { maxCostUsd, maxCharacters, maxProviderRequests },
+        rights: {
+          affirmed: input.rightsAffirmed === true,
+          scope: input.rightsScope === "redistribution" ? "redistribution" : "private-listening",
+          attestor: input.attestor === "agent" ? "agent" : "user",
+          statementVersion: "2026-08-15",
+          affirmedAt: new Date().toISOString(),
+        },
+        pronunciation,
+      };
+      return send(response, 201, audiobooks.createPlan(planInput, idempotencyKey, sha256(canonicalJson(input))));
+    }
+    const audiobookMatch = url.pathname.match(/^\/api\/audiobooks\/([^/]+)$/);
+    if (request.method === "GET" && audiobookMatch) {
+      const run = audiobooks.get(audiobookMatch[1]!);
+      return run ? send(response, 200, run) : send(response, 404, { error: "Audiobook run not found" });
+    }
+    const audiobookActionMatch = url.pathname.match(/^\/api\/audiobooks\/([^/]+)\/(confirm|start|pause|resume|cancel|approve|export)$/);
+    if (request.method === "POST" && audiobookActionMatch) {
+      const [, audiobookId, action] = audiobookActionMatch;
+      const input = await body(request);
+      if (action === "confirm") {
+        if (typeof input.planHash !== "string") return send(response, 400, { error: "Exact plan hash is required" });
+        return send(response, 200, audiobooks.confirm(audiobookId!, input.planHash));
+      }
+      if (action === "pause") return send(response, 200, audiobooks.pause(audiobookId!));
+      if (action === "cancel") return send(response, 200, audiobooks.cancel(audiobookId!));
+      if (action === "approve") {
+        return send(response, 200, audiobooks.approveReview(audiobookId!, {
+          reviewer: input.reviewer === "agent" ? "agent" : "user",
+          reason: typeof input.reason === "string" ? input.reason : undefined,
+        }));
+      }
+      if (action === "export") return send(response, 200, await audiobooks.exportPackage(audiobookId!, {
+        affirmed: input.exportAffirmed === true,
+        purpose: input.purpose === "redistribution" ? "redistribution" : "private-backup",
+        attestor: input.attestor === "agent" ? "agent" : "user",
+      }));
+      const run = audiobooks.get(audiobookId!);
+      if (!run) return send(response, 404, { error: "Audiobook run not found" });
+      audiobooks.assertProcessable(audiobookId!);
+      const providers = await providerRegistry();
+      const capability = providers[run.provider]?.capability();
+      if (!capability?.available) return send(response, 409, { error: capability?.reason ?? "Provider is unavailable" });
+      scheduleAudioWork(async () => {
+        await audiobooks.process(audiobookId!, providers, { validateChunk: currentChunkSource });
+      });
+      return send(response, 202, run);
+    }
+    const audiobookRetryMatch = url.pathname.match(/^\/api\/audiobooks\/([^/]+)\/chunks\/([^/]+)\/retry$/);
+    if (request.method === "POST" && audiobookRetryMatch) {
+      return send(response, 200, await audiobooks.retryChunk(audiobookRetryMatch[1]!, audiobookRetryMatch[2]!));
     }
 
     if (request.method === "GET" && url.pathname === "/api/audio/jobs") {
@@ -391,7 +547,9 @@ return {
       if (closed) return resolveClose();
       closed = true;
       server.close((error) => {
-        void audio.close().then(() => {
+        const audioClose = audio.close();
+        void Promise.all([processingTail, audioClose]).then(() => {
+          audiobooks.close();
           workspace.close();
           if (error) rejectClose(error);
           else resolveClose();

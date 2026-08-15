@@ -10,6 +10,12 @@ import type { VoiceProvider } from "@scribe-skill/audio";
 
 import { startLocalService } from "../src/server.ts";
 
+function fakeMp3(marker = 0): Uint8Array {
+  const bytes = new Uint8Array(417);
+  bytes.set([0xff, 0xfb, 0x90, 0x64, marker]);
+  return bytes;
+}
+
 test("serves a token-protected, cited reader workflow over loopback", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "scribe-skill-service-"));
   const pdfPath = join(root, "reader.pdf");
@@ -176,4 +182,196 @@ test("builds cited section scripts and caches a provider artifact without a real
   const boundedJobs = await fetch(`${service.url}/api/audio/jobs?limit=1`, { headers }).then((response) => response.json()) as unknown[];
   assert.equal(boundedJobs.length, 1);
   assert.equal((await fetch(`${service.url}/api/audio/jobs?limit=0`, { headers })).status, 400);
+});
+
+test("plans and exports a rights- and budget-gated audiobook through the agent API", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "scribe-skill-audiobook-service-"));
+  const pdfPath = join(root, "book.pdf");
+  const pdf = await PDFDocument.create();
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  const page = pdf.addPage([600, 800]);
+  page.drawText("A sufficiently long cited chapter becomes a reviewable audiobook package for an agent.", { x: 50, y: 720, size: 12, font });
+  await writeFile(pdfPath, await pdf.save());
+  let providerCalls = 0;
+  const fakeOpenAi: VoiceProvider = {
+    capability: () => ({ provider: "openai", available: true, requiresApiKey: true, timingQuality: "none", streaming: false, maxCharacters: 4096 }),
+    synthesize: async () => {
+      providerCalls += 1;
+      return {
+        mimeType: "audio/mpeg",
+        bytes: fakeMp3(providerCalls),
+        timingQuality: "none",
+        timings: [],
+        disclosure: "Synthetic API test voice",
+      };
+    },
+  };
+  const token = "audiobook-token";
+  const service = await startLocalService({
+    token,
+    workspacePath: join(root, "library"),
+    createProviderRegistry: async () => ({ openai: fakeOpenAi }),
+  });
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const headers = { "content-type": "application/json", "x-scribe-token": token };
+  const imported = await fetch(`${service.url}/api/import`, {
+    method: "POST", headers, body: JSON.stringify({ path: pdfPath }),
+  }).then((response) => response.json()) as { document: { id: string }; sections: Array<{ id: string }> };
+
+  const noIdempotency = await fetch(`${service.url}/api/audiobooks/plans`, {
+    method: "POST", headers, body: JSON.stringify({ documentId: imported.document.id }),
+  });
+  assert.equal(noIdempotency.status, 400);
+  const planBody = JSON.stringify({
+    documentId: imported.document.id,
+    sectionIds: [imported.sections[0]!.id],
+    provider: "openai",
+    voice: "coral",
+    maxChunkCharacters: 64,
+    usdPerMillionCharacters: 20,
+    maxCostUsd: 1,
+    maxCharacters: 10_000,
+    maxProviderRequests: 10,
+    rightsAffirmed: true,
+  });
+  const duplicateSections = await fetch(`${service.url}/api/audiobooks/plans`, {
+    method: "POST",
+    headers: { ...headers, "idempotency-key": "duplicate-sections" },
+    body: JSON.stringify({ ...JSON.parse(planBody), sectionIds: [imported.sections[0]!.id, imported.sections[0]!.id] }),
+  });
+  assert.equal(duplicateSections.status, 400);
+  const planResponse = await fetch(`${service.url}/api/audiobooks/plans`, {
+    method: "POST",
+    headers: { ...headers, "idempotency-key": "api-audiobook-plan" },
+    body: planBody,
+  });
+  assert.equal(planResponse.status, 201);
+  let run = await planResponse.json() as { id: string; planHash: string; state: string; blockers: unknown[]; chunks: unknown[]; export?: { path: string } };
+  assert.equal(run.state, "draft");
+  assert.equal(run.blockers.length, 0);
+  assert.ok(run.chunks.length >= 2);
+  const replay = await fetch(`${service.url}/api/audiobooks/plans`, {
+    method: "POST",
+    headers: { ...headers, "idempotency-key": "api-audiobook-plan" },
+    body: planBody,
+  });
+  assert.equal(replay.status, 201);
+  assert.equal((await replay.json() as { id: string }).id, run.id);
+  assert.equal((await fetch(`${service.url}/api/audiobooks/${run.id}/start`, { method: "POST", headers, body: "{}" })).status, 400);
+  run = await fetch(`${service.url}/api/audiobooks/${run.id}/confirm`, {
+    method: "POST", headers, body: JSON.stringify({ planHash: run.planHash }),
+  }).then((response) => response.json()) as typeof run;
+  assert.equal(run.state, "approved");
+  const start = await fetch(`${service.url}/api/audiobooks/${run.id}/start`, { method: "POST", headers, body: "{}" });
+  assert.equal(start.status, 202);
+  for (let attempt = 0; attempt < 50 && run.state !== "needs-review"; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    run = await fetch(`${service.url}/api/audiobooks/${run.id}`, { headers }).then((response) => response.json()) as typeof run;
+  }
+  assert.equal(run.state, "needs-review");
+  assert.equal(providerCalls, run.chunks.length);
+  run = await fetch(`${service.url}/api/audiobooks/${run.id}/approve`, {
+    method: "POST", headers, body: JSON.stringify({ reviewer: "agent", reason: "Verified every deterministic fake-provider part." }),
+  }).then((response) => response.json()) as typeof run;
+  assert.equal(run.state, "completed");
+  const unauthorizedExport = await fetch(`${service.url}/api/audiobooks/${run.id}/export`, { method: "POST", headers, body: "{}" });
+  assert.equal(unauthorizedExport.status, 400);
+  run = await fetch(`${service.url}/api/audiobooks/${run.id}/export`, { method: "POST", headers, body: JSON.stringify({ exportAffirmed: true, purpose: "private-backup", attestor: "agent" }) })
+    .then((response) => response.json()) as typeof run;
+  assert.ok(run.export?.path.includes("production/exports"));
+
+  let staleRun = await fetch(`${service.url}/api/audiobooks/plans`, {
+    method: "POST",
+    headers: { ...headers, "idempotency-key": "api-source-drift-plan" },
+    body: JSON.stringify({
+      documentId: imported.document.id,
+      sectionIds: [imported.sections[0]!.id],
+      provider: "openai",
+      voice: "alloy",
+      maxChunkCharacters: 64,
+      usdPerMillionCharacters: 20,
+      maxCostUsd: 1,
+      maxCharacters: 10_000,
+      maxProviderRequests: 10,
+      rightsAffirmed: true,
+    }),
+  }).then((response) => response.json()) as typeof run;
+  staleRun = await fetch(`${service.url}/api/audiobooks/${staleRun.id}/confirm`, {
+    method: "POST", headers, body: JSON.stringify({ planHash: staleRun.planHash }),
+  }).then((response) => response.json()) as typeof run;
+  const callsBeforeDrift = providerCalls;
+  const inspection = await fetch(`${service.url}/api/documents/${imported.document.id}/pages/1`, { headers })
+    .then((response) => response.json()) as { blocks: Array<{ id: string }> };
+  await fetch(`${service.url}/api/blocks/${inspection.blocks[0]!.id}`, {
+    method: "PATCH", headers, body: JSON.stringify({ status: "excluded", note: "Simulate approved source disappearing" }),
+  });
+  await fetch(`${service.url}/api/audiobooks/${staleRun.id}/start`, { method: "POST", headers, body: "{}" });
+  for (let attempt = 0; attempt < 50 && staleRun.state !== "stale"; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    staleRun = await fetch(`${service.url}/api/audiobooks/${staleRun.id}`, { headers }).then((response) => response.json()) as typeof run;
+  }
+  assert.equal(staleRun.state, "stale");
+  assert.equal(providerCalls, callsBeforeDrift);
+});
+
+test("agent API regenerates one structurally invalid part and resumes without repeating completed parts", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "scribe-skill-audiobook-retry-"));
+  const pdfPath = join(root, "retry.pdf");
+  const pdf = await PDFDocument.create();
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  const page = pdf.addPage([600, 800]);
+  page.drawText("First cited sentence completes. Second cited sentence fails once. Third cited sentence completes after the deliberate retry.", { x: 40, y: 720, size: 10, font });
+  await writeFile(pdfPath, await pdf.save());
+  const callsByText = new Map<string, number>();
+  let calls = 0;
+  const provider: VoiceProvider = {
+    capability: () => ({ provider: "openai", available: true, requiresApiKey: true, timingQuality: "none", streaming: false, maxCharacters: 4096 }),
+    synthesize: async (narration) => {
+      calls += 1;
+      callsByText.set(narration.script.readingText, (callsByText.get(narration.script.readingText) ?? 0) + 1);
+      return {
+        mimeType: "audio/mpeg",
+        bytes: calls === 2 ? Uint8Array.from([73, 68, 51, calls]) : fakeMp3(calls),
+        timingQuality: "none",
+        timings: [],
+        disclosure: "Retry test voice",
+      };
+    },
+  };
+  const token = "retry-token";
+  const service = await startLocalService({ token, workspacePath: join(root, "library"), createProviderRegistry: async () => ({ openai: provider }) });
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const headers = { "content-type": "application/json", "x-scribe-token": token };
+  const imported = await fetch(`${service.url}/api/import`, { method: "POST", headers, body: JSON.stringify({ path: pdfPath }) })
+    .then((response) => response.json()) as { document: { id: string }; sections: Array<{ id: string }> };
+  let run = await fetch(`${service.url}/api/audiobooks/plans`, {
+    method: "POST",
+    headers: { ...headers, "idempotency-key": "retry-plan" },
+    body: JSON.stringify({ documentId: imported.document.id, sectionIds: [imported.sections[0]!.id], provider: "openai", voice: "coral", maxChunkCharacters: 48, usdPerMillionCharacters: 20, maxCostUsd: 1, maxCharacters: 10_000, maxProviderRequests: 20, rightsAffirmed: true }),
+  }).then((response) => response.json()) as { id: string; planHash: string; state: string; chunks: Array<{ id: string; state: string; request: { script: { readingText: string } } }> };
+  run = await fetch(`${service.url}/api/audiobooks/${run.id}/confirm`, { method: "POST", headers, body: JSON.stringify({ planHash: run.planHash }) }).then((response) => response.json()) as typeof run;
+  await fetch(`${service.url}/api/audiobooks/${run.id}/start`, { method: "POST", headers, body: "{}" });
+  for (let attempt = 0; attempt < 50 && run.state !== "failed"; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    run = await fetch(`${service.url}/api/audiobooks/${run.id}`, { headers }).then((response) => response.json()) as typeof run;
+  }
+  assert.equal(run.state, "failed");
+  const completedText = run.chunks.find(({ state }) => state === "generated")!.request.script.readingText;
+  const failedChunk = run.chunks.find(({ state }) => state === "failed")!;
+  run = await fetch(`${service.url}/api/audiobooks/${run.id}/chunks/${failedChunk.id}/retry`, { method: "POST", headers, body: "{}" }).then((response) => response.json()) as typeof run;
+  assert.equal(run.state, "paused");
+  await fetch(`${service.url}/api/audiobooks/${run.id}/resume`, { method: "POST", headers, body: "{}" });
+  for (let attempt = 0; attempt < 50 && run.state !== "needs-review"; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    run = await fetch(`${service.url}/api/audiobooks/${run.id}`, { headers }).then((response) => response.json()) as typeof run;
+  }
+  assert.equal(run.state, "needs-review");
+  assert.equal(callsByText.get(completedText), 1);
+  assert.equal(calls, run.chunks.length + 1);
 });
