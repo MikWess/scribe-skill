@@ -19,6 +19,7 @@
   },
   "devDependencies": {
     "@scribe-skill/audio": "workspace:*",
+    "@scribe-skill/audiobook": "workspace:*",
     "@scribe-skill/core": "workspace:*",
     "@scribe-skill/pdf-workspace": "workspace:*",
     "@types/node": "^24.0.0",

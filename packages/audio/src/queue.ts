@@ -208,6 +208,19 @@ export class AudioWorkspace {
     return this.get(id)!;
   }
 
+  regenerateCompleted(id: string): AudioJob {
+    const current = this.get(id);
+    if (!current) throw new Error(`Unknown audio job: ${id}`);
+    if (current.status !== "completed") throw new Error("Only a completed audio job can be explicitly regenerated");
+    const updatedAt = new Date().toISOString();
+    this.database.prepare(
+      `UPDATE audio_jobs SET status = 'queued', artifact_hash = NULL, artifact_path = NULL, mime_type = NULL,
+       byte_length = NULL, timing_quality = NULL, timings_json = NULL, disclosure = NULL,
+       artifact_created_at = NULL, error = NULL, updated_at = ? WHERE id = ? AND status = 'completed'`,
+    ).run(updatedAt, id);
+    return this.get(id)!;
+  }
+
   cancel(id: string): AudioJob {
     const current = this.get(id);
     if (!current) throw new Error(`Unknown audio job: ${id}`);
@@ -220,9 +233,16 @@ export class AudioWorkspace {
 
   async processNext(providers: VoiceProviderRegistry): Promise<AudioJob | undefined> {
     if (this.closing) return undefined;
-    const row = this.database.prepare("SELECT * FROM audio_jobs WHERE status = 'queued' ORDER BY created_at LIMIT 1").get();
+    const row = this.database.prepare("SELECT id FROM audio_jobs WHERE status = 'queued' ORDER BY created_at LIMIT 1").get();
     if (!row) return undefined;
-    const job = normalizeJob(row);
+    return this.processJob(String(row.id), providers);
+  }
+
+  async processJob(id: string, providers: VoiceProviderRegistry): Promise<AudioJob | undefined> {
+    if (this.closing) return undefined;
+    const job = this.get(id);
+    if (!job) throw new Error(`Unknown audio job: ${id}`);
+    if (job.status !== "queued") return job;
     const provider = job.request.provider === "device" ? undefined : providers[job.request.provider];
     if (!provider) return this.fail(job.id, `Provider ${job.request.provider} is not configured`);
     const capability = provider.capability();

@@ -6,3 +6,4 @@ target/
 coverage/
 work/
 .DS_Store
+.gstack/
