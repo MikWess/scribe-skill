@@ -4,6 +4,15 @@ import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
+import {
+  AudioWorkspace,
+  ElevenLabsVoiceProvider,
+  OpenAiVoiceProvider,
+  createNarrationScript,
+} from "@scribe-skill/audio";
+import type { AudioJob, NarrationRequest, VoiceCapability, VoiceProviderRegistry } from "@scribe-skill/audio";
+import { getCodexCapability } from "@scribe-skill/core";
+import type { Capability, EvidenceAnchor } from "@scribe-skill/core";
 import { PdfWorkspace } from "@scribe-skill/pdf-workspace";
 
 const insecureDevelopmentToken = "local-development-only";
@@ -14,6 +23,9 @@ export interface LocalServiceOptions {
   token: string;
   workspacePath: string;
   allowedOrigins?: string[];
+  resolveProviderKey?: (provider: "openai" | "elevenlabs") => Promise<string | undefined>;
+  resolveCodexCapability?: () => Promise<Capability>;
+  createProviderRegistry?: () => Promise<VoiceProviderRegistry>;
 }
 
 export interface LocalServiceHandle {
@@ -63,6 +75,77 @@ if (!options.token) throw new Error("A non-empty local service token is required
 const token = options.token;
 const allowedOrigins = new Set(options.allowedOrigins ?? []);
 const workspace = await PdfWorkspace.open(resolve(options.workspacePath));
+const audio = await AudioWorkspace.open(join(workspace.rootPath, "audio"));
+const resolveProviderKey = options.resolveProviderKey ?? (async (provider) =>
+  provider === "openai" ? process.env.OPENAI_API_KEY : process.env.ELEVENLABS_API_KEY);
+let codexCapabilityPromise: Promise<Capability> | undefined;
+const resolveCodexCapability = () =>
+  codexCapabilityPromise ??= (options.resolveCodexCapability ?? (() => getCodexCapability()))();
+let draining = false;
+
+async function providerRegistry(): Promise<VoiceProviderRegistry> {
+  if (options.createProviderRegistry) {
+    return {
+      openai: new OpenAiVoiceProvider(undefined),
+      elevenlabs: new ElevenLabsVoiceProvider(undefined),
+      ...await options.createProviderRegistry(),
+    };
+  }
+  const [openaiKey, elevenlabsKey] = await Promise.all([
+    resolveProviderKey("openai"),
+    resolveProviderKey("elevenlabs"),
+  ]);
+  return {
+    openai: new OpenAiVoiceProvider(openaiKey),
+    elevenlabs: new ElevenLabsVoiceProvider(elevenlabsKey),
+  };
+}
+
+async function capabilities(): Promise<{ voices: VoiceCapability[]; codex: Capability }> {
+  const providers = await providerRegistry();
+  return {
+    voices: [
+      {
+        provider: "device",
+        available: false,
+        requiresApiKey: false,
+        timingQuality: "estimated-sentence",
+        streaming: true,
+        reason: "Device voice availability is detected in the browser",
+      },
+      providers.openai!.capability(),
+      providers.elevenlabs!.capability(),
+    ],
+    codex: await resolveCodexCapability(),
+  };
+}
+
+async function drainAudioQueue(): Promise<void> {
+  if (draining) return;
+  draining = true;
+  try {
+    while (await audio.processNext(await providerRegistry())) {
+      // Keep draining until the atomic claim reports that no queued job remains.
+    }
+  } finally {
+    draining = false;
+  }
+}
+
+function scriptForSection(sectionId: string, readingText?: string, revision = 1) {
+  const section = workspace.getSection(sectionId);
+  if (!section) throw new Error(`Unknown section: ${sectionId}`);
+  const blocks = workspace.listIncludedBlocksInPageRange(section.documentId, section.startPage, section.endPage);
+  if (blocks.length === 0) throw new Error("This section has no included extracted text to narrate");
+  const sourceText = blocks.map(({ sourceText }) => sourceText).join("\n\n");
+  const defaultReadingText = blocks.map(({ currentText }) => currentText).join("\n\n");
+  const evidence = blocks.map(({ id }) => workspace.evidenceForBlock(id));
+  if (readingText === undefined) {
+    const latest = audio.latestScript(section.id);
+    if (latest && latest.sourceText === sourceText && JSON.stringify(latest.evidence) === JSON.stringify(evidence)) return latest;
+  }
+  return createNarrationScript(section.id, sourceText, readingText ?? defaultReadingText, evidence, revision);
+}
 
 const server = createServer(async (request, response) => {
   try {
@@ -78,6 +161,9 @@ const server = createServer(async (request, response) => {
 
     if (request.method === "GET" && url.pathname === "/api/health") {
       return send(response, 200, { status: "ok", workspace: workspace.rootPath });
+    }
+    if (request.method === "GET" && url.pathname === "/api/capabilities") {
+      return send(response, 200, await capabilities());
     }
     if (request.method === "POST" && url.pathname === "/api/import") {
       const input = await body(request);
@@ -128,8 +214,88 @@ const server = createServer(async (request, response) => {
       return send(response, 200, workspace.listSections(sectionsMatch[1]!));
     }
     const sectionMatch = url.pathname.match(/^\/api\/sections\/([^/]+)$/);
+    const narrationScriptMatch = url.pathname.match(/^\/api\/sections\/([^/]+)\/narration-script$/);
+    if (request.method === "GET" && narrationScriptMatch) {
+      return send(response, 200, scriptForSection(narrationScriptMatch[1]!));
+    }
+    if (request.method === "POST" && narrationScriptMatch) {
+      const input = await body(request);
+      if (typeof input.readingText !== "string" || !input.readingText.trim()) {
+        return send(response, 400, { error: "Narration reading text is required" });
+      }
+      const revision = Number(input.revision);
+      if (!Number.isSafeInteger(revision) || revision < 1) return send(response, 400, { error: "A positive script revision is required" });
+      return send(response, 201, audio.saveScript(scriptForSection(narrationScriptMatch[1]!, input.readingText, revision)));
+    }
     if (request.method === "PATCH" && sectionMatch) {
       return send(response, 200, workspace.updateSection(sectionMatch[1]!, await body(request)));
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/audio/jobs") {
+      const requestedLimit = Number(url.searchParams.get("limit") ?? 50);
+      if (!Number.isSafeInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 200) {
+        return send(response, 400, { error: "Audio job limit must be an integer from 1 to 200" });
+      }
+      return send(response, 200, audio.list(undefined, requestedLimit));
+    }
+    if (request.method === "POST" && url.pathname === "/api/audio/jobs") {
+      const input = await body(request);
+      if (input.provider !== "openai" && input.provider !== "elevenlabs") {
+        return send(response, 400, { error: "Audio provider must be openai or elevenlabs" });
+      }
+      if (typeof input.sectionId !== "string" || typeof input.voice !== "string" || !input.voice.trim()) {
+        return send(response, 400, { error: "Section and voice are required" });
+      }
+      const providers = await providerRegistry();
+      const provider = providers[input.provider];
+      const capability = provider?.capability();
+      if (!capability?.available) return send(response, 409, { error: capability?.reason ?? "Provider is unavailable" });
+      if (input.revision !== undefined && (typeof input.revision !== "number" || !Number.isSafeInteger(input.revision) || input.revision < 1)) {
+        return send(response, 400, { error: "Narration revision must be a positive integer" });
+      }
+      const script = scriptForSection(
+        input.sectionId,
+        typeof input.readingText === "string" ? input.readingText : undefined,
+        input.revision ?? 1,
+      );
+      if (capability.maxCharacters && script.readingText.length > capability.maxCharacters) {
+        return send(response, 422, {
+          error: `${input.provider === "openai" ? "OpenAI" : "Provider"} accepts at most ${capability.maxCharacters.toLocaleString()} characters per request; split this section before generating audio`,
+        });
+      }
+      audio.saveScript(script);
+      const narrationRequest: NarrationRequest = {
+        script,
+        provider: input.provider,
+        voice: input.voice.trim(),
+        model: typeof input.model === "string" && input.model.trim() ? input.model.trim() : undefined,
+        instructions: typeof input.instructions === "string" && input.instructions.trim() ? input.instructions.trim() : undefined,
+        format: input.format === "wav" ? "wav" : "mp3",
+      };
+      const job = audio.enqueue(narrationRequest);
+      void drainAudioQueue();
+      return send(response, 202, job);
+    }
+    const audioJobMatch = url.pathname.match(/^\/api\/audio\/jobs\/([^/]+)$/);
+    if (request.method === "GET" && audioJobMatch) {
+      const job = audio.get(audioJobMatch[1]!);
+      return job ? send(response, 200, job) : send(response, 404, { error: "Audio job not found" });
+    }
+    const audioCancelMatch = url.pathname.match(/^\/api\/audio\/jobs\/([^/]+)\/cancel$/);
+    if (request.method === "POST" && audioCancelMatch) {
+      return send(response, 200, audio.cancel(audioCancelMatch[1]!));
+    }
+    const audioRetryMatch = url.pathname.match(/^\/api\/audio\/jobs\/([^/]+)\/retry$/);
+    if (request.method === "POST" && audioRetryMatch) {
+      const job = audio.retry(audioRetryMatch[1]!);
+      void drainAudioQueue();
+      return send(response, 202, job);
+    }
+    const audioArtifactMatch = url.pathname.match(/^\/api\/audio\/jobs\/([^/]+)\/artifact$/);
+    if (request.method === "GET" && audioArtifactMatch) {
+      const job = audio.get(audioArtifactMatch[1]!);
+      if (!job?.artifact) return send(response, 404, { error: "Audio artifact is not ready" });
+      return send(response, 200, await audio.readArtifact(job.id), job.artifact.mimeType);
     }
     const blockMatch = url.pathname.match(/^\/api\/blocks\/([^/]+)$/);
     if (request.method === "PATCH" && blockMatch) {
@@ -225,9 +391,11 @@ return {
       if (closed) return resolveClose();
       closed = true;
       server.close((error) => {
-        workspace.close();
-        if (error) rejectClose(error);
-        else resolveClose();
+        void audio.close().then(() => {
+          workspace.close();
+          if (error) rejectClose(error);
+          else resolveClose();
+        }, rejectClose);
       });
     }),
 };

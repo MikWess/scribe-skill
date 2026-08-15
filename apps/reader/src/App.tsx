@@ -1,8 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { NarrationPanel } from "./NarrationPanel.js";
+
 declare global {
   interface Window {
-    scribeRuntime?: { api?: string; token?: string };
+    scribeRuntime?: {
+      api?: string;
+      token?: string;
+      providerKeyStatus?: () => Promise<{ secureStorage: boolean; openai: boolean; elevenlabs: boolean }>;
+      setProviderKey?: (provider: "openai" | "elevenlabs", key: string) => Promise<{ saved: boolean }>;
+      deleteProviderKey?: (provider: "openai" | "elevenlabs") => Promise<{ deleted: boolean }>;
+    };
   }
 }
 
@@ -334,6 +342,12 @@ export function App() {
     }
   }
 
+  async function fetchAudioArtifact(jobId: string): Promise<string> {
+    const response = await fetch(`${API}/api/audio/jobs/${jobId}/artifact`, { headers: { "x-scribe-token": TOKEN } });
+    if (!response.ok) throw new Error("Audio artifact is not ready");
+    return URL.createObjectURL(await response.blob());
+  }
+
   if (!document) {
     return (
       <main className="welcome-shell">
@@ -461,7 +475,7 @@ export function App() {
           </div>
 
           {activeSection && (
-            <fieldset className="section-editor">
+            <><fieldset className="section-editor">
               <legend>Navigation guide</legend>
               <label>Section title<input key={`${activeSection.id}-title`} defaultValue={activeSection.title} onBlur={(event) => void updateSection({ title: event.target.value })} /></label>
               <div className="range-fields">
@@ -469,6 +483,7 @@ export function App() {
                 <label>To<input key={`${activeSection.id}-to`} type="number" min="1" max={document.pageCount} defaultValue={activeSection.endPage} onBlur={(event) => void updateSection({ endPage: Number(event.target.value) })} /></label>
               </div>
             </fieldset>
+            <NarrationPanel section={activeSection} documentName={document.originalName} requestJson={request} fetchArtifact={fetchAudioArtifact} /></>
           )}
 
           <div className="block-list" aria-label="Extracted reading order">
