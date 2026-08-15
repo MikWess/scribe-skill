@@ -17,7 +17,7 @@ The exported skill is a navigation guide, not a static summary. Given a task, it
 
 ## Status
 
-Early implementation. The evidence/navigation foundation and deterministic local PDF workspace are merged; the accessible reader is the current pull-request slice. Read the [PRD](docs/PRD.md), [70+ source market research](docs/market-research.md), and [six-profile blind-test findings](docs/blind-test.md).
+Early implementation. The evidence/navigation foundation, deterministic local PDF workspace, and accessible reader are merged. The current slice adds cited section scripts, zero-key device narration, encrypted BYOK setup, and persistent provider audio jobs. Read the [PRD](docs/PRD.md), [70+ source market research](docs/market-research.md), and [six-profile blind-test findings](docs/blind-test.md).
 
 ## Developer quick start
 
@@ -34,6 +34,8 @@ pnpm --filter @scribe-skill/reader dev:stack
 The inspection command stores the source by hash, extracts blocks into SQLite, renders page 1 to PNG, reports page quality, and prints source text with evidence coordinates. Image-only PDFs are marked `ocr-required` rather than treated as searchable.
 
 The reader command starts the loopback-only local service and browser UI at `http://localhost:5173`. It uses an explicitly enabled development token; direct service use requires `SCRIBE_SKILL_TOKEN`. The Electron desktop host starts the same service itself on a random port with an ephemeral token, so `pnpm --filter @scribe-skill/reader desktop:dev` needs no separate server process. Build an unpacked desktop app for the current platform with `pnpm --filter @scribe-skill/reader desktop:build`.
+
+Select a section in the reader to open its narration studio. Device voices need no API key and preview the current cited script with browser boundary highlighting. In the desktop app, OpenAI and ElevenLabs keys are encrypted with the operating system's secure storage and never written to SQLite. The browser development surface reads `OPENAI_API_KEY` or `ELEVENLABS_API_KEY` from the local service environment instead. OpenAI audio is deliberately labeled as having no synchronized timestamps; the ElevenLabs timestamp endpoint supplies exact character alignment when returned by the provider.
 
 ## Design principles
 

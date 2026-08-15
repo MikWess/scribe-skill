@@ -500,6 +500,17 @@ export class PdfWorkspace {
     return rows.map(normalizeBlock);
   }
 
+  listIncludedBlocksInPageRange(documentId: string, startPage: number, endPage: number): ExtractedBlock[] {
+    return this.database
+      .prepare(
+        `SELECT * FROM blocks
+         WHERE document_id = ? AND page_number BETWEEN ? AND ? AND status = 'included'
+         ORDER BY page_number, current_order`,
+      )
+      .all(documentId, startPage, endPage)
+      .map(normalizeBlock);
+  }
+
   editBlock(
     blockId: string,
     patch: { text?: string; order?: number; status?: BlockStatus },
@@ -645,6 +656,11 @@ export class PdfWorkspace {
         endPage: Number(row.end_page),
         order: Number(row.section_order),
       }));
+  }
+
+  getSection(sectionId: string): DocumentSection | undefined {
+    const row = this.database.prepare("SELECT document_id FROM sections WHERE id = ?").get(sectionId);
+    return row ? this.listSections(String(row.document_id)).find(({ id }) => id === sectionId) : undefined;
   }
 
   updateSection(

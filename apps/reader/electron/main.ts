@@ -3,9 +3,10 @@ import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { app, BrowserWindow, protocol, session } from "electron";
+import { app, BrowserWindow, ipcMain, protocol, safeStorage, session, type IpcMainInvokeEvent } from "electron";
 
 import { startLocalService, type LocalServiceHandle } from "../../local-service/src/server.ts";
+import { isTrustedRendererUrl, ProviderSecretStore, parseProviderName } from "./secret-store.ts";
 
 protocol.registerSchemesAsPrivileged([
   { scheme: "scribe-skill", privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } },
@@ -13,13 +14,47 @@ protocol.registerSchemesAsPrivileged([
 
 let service: LocalServiceHandle | undefined;
 let shuttingDown = false;
+let secretStore: ProviderSecretStore | undefined;
+
+function registerSecretIpc(): void {
+  ipcMain.removeHandler("scribe:provider-key-status");
+  ipcMain.removeHandler("scribe:set-provider-key");
+  ipcMain.removeHandler("scribe:delete-provider-key");
+  const assertTrustedRenderer = (event: IpcMainInvokeEvent) => {
+    if (!isTrustedRendererUrl(event.senderFrame?.url ?? "")) throw new Error("Provider keys are only available to the ScribeSkill app");
+  };
+  ipcMain.handle("scribe:provider-key-status", async (event) => {
+    assertTrustedRenderer(event);
+    return ({
+    secureStorage: secretStore?.available() ?? false,
+    openai: await secretStore?.has("openai") ?? false,
+    elevenlabs: await secretStore?.has("elevenlabs") ?? false,
+  });
+  });
+  ipcMain.handle("scribe:set-provider-key", async (event, provider: unknown, key: unknown) => {
+    assertTrustedRenderer(event);
+    if (typeof key !== "string") throw new Error("API key must be a string");
+    await secretStore?.set(parseProviderName(provider), key);
+    return { saved: true };
+  });
+  ipcMain.handle("scribe:delete-provider-key", async (event, provider: unknown) => {
+    assertTrustedRenderer(event);
+    await secretStore?.delete(parseProviderName(provider));
+    return { deleted: true };
+  });
+}
 
 async function createWindow(): Promise<void> {
+  secretStore ??= new ProviderSecretStore(join(app.getPath("userData"), "secrets", "providers.json"), safeStorage);
+  registerSecretIpc();
   const token = service?.token ?? randomBytes(32).toString("base64url");
   service ??= await startLocalService({
       token,
       workspacePath: join(app.getPath("userData"), "library"),
-    allowedOrigins: ["scribe-skill://app"],
+      allowedOrigins: ["scribe-skill://app"],
+      resolveProviderKey: async (provider) =>
+        await secretStore?.get(provider) ??
+        (provider === "openai" ? process.env.OPENAI_API_KEY : process.env.ELEVENLABS_API_KEY),
     });
 
   const smokePdf =

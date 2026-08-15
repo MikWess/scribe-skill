@@ -8,6 +8,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@scribe-skill/audio": "workspace:*",
+    "@scribe-skill/core": "workspace:*",
     "@scribe-skill/pdf-workspace": "workspace:*"
   },
   "devDependencies": {

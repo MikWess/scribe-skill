@@ -13,6 +13,7 @@
 * { box-sizing: border-box; }
 body { margin: 0; min-height: 100vh; }
 button, input, textarea { font: inherit; }
+select, audio { font: inherit; }
 button { color: inherit; }
 button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px solid #1e66f5; outline-offset: 2px; }
 
@@ -93,6 +94,41 @@ h1 { font: 500 clamp(46px, 8vw, 82px)/.94 "Iowan Old Style", Baskerville, serif;
 .section-editor label, .note-field { display: grid; gap: 4px; font: 10px monospace; text-transform: uppercase; }
 .section-editor input { width: 100%; background: transparent; border: 0; border-bottom: 1px solid var(--line); padding: 7px 3px; }
 .range-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.narration-studio { margin: 14px; border: 1px solid var(--ink); background: #fffdf5; }
+.narration-studio > summary { display: grid; gap: 4px; padding: 11px; cursor: pointer; border-bottom: 1px solid var(--line); }
+.narration-studio > summary span { font: 700 9px/1 monospace; letter-spacing: .13em; }
+.narration-studio > summary strong { font: 600 16px/1.2 "Iowan Old Style", serif; }
+.narration-body { padding: 10px; }
+.provider-tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
+.provider-tabs button { min-width: 0; min-height: 44px; border: 1px solid var(--ink); background: transparent; padding: 8px 4px; cursor: pointer; font: 700 11px/1.1 monospace; }
+.provider-tabs button[aria-pressed="true"] { background: var(--ink); color: white; }
+.provider-tabs small { display: block; margin-top: 4px; color: #39934a; font-size: 7px; }
+.provider-tabs button:not([aria-pressed="true"]) small { color: #53645c; }
+.capability-strip { display: grid; gap: 3px; margin: 8px 0; padding: 7px; background: #edf1df; border-left: 3px solid #39934a; font: 8px/1.35 monospace; }
+.capability-strip[data-available="false"] { background: #f4e4dd; border-left-color: var(--rust); }
+.script-field, .voice-field, .key-field label { display: grid; gap: 4px; margin-top: 9px; font: 700 8px/1.3 monospace; text-transform: uppercase; letter-spacing: .06em; }
+.script-field textarea { min-height: 105px; resize: vertical; border: 1px solid var(--line); background: white; padding: 8px; font: 16px/1.5 "Iowan Old Style", serif; text-transform: none; }
+.script-preview { max-height: 100px; overflow: auto; margin-top: 7px; padding: 8px; border: 1px dashed var(--line); white-space: pre-wrap; font: 16px/1.5 "Iowan Old Style", serif; }
+.script-preview mark { background: var(--acid); box-shadow: 0 0 0 2px var(--acid); }
+.script-provenance { margin-top: 5px; font: 7px/1.3 monospace; opacity: .6; }
+.save-script { width: 100%; margin-top: 7px; border: 1px solid var(--ink); background: transparent; padding: 7px; cursor: pointer; font: 700 8px/1 monospace; }
+.save-script:not(:disabled) { background: var(--acid); }
+.save-script:disabled { opacity: .4; cursor: default; }
+.voice-field select, .voice-field input, .key-field input { width: 100%; min-width: 0; border: 1px solid var(--ink); background: white; padding: 7px; text-transform: none; }
+.key-field { display: grid; grid-template-columns: 1fr auto; gap: 6px; align-items: end; }
+.key-field button { height: 31px; border: 1px solid var(--ink); background: var(--acid); cursor: pointer; font: 700 9px monospace; }
+.key-manager { margin-top: 9px; padding: 7px; border: 1px dashed var(--line); font: 8px/1.3 monospace; }
+.key-manager summary { cursor: pointer; font-weight: 700; text-transform: uppercase; }
+.key-manager .remove-key { margin-top: 7px; border: 0; border-bottom: 1px solid var(--rust); background: transparent; color: var(--rust); cursor: pointer; font: 8px monospace; }
+.narration-actions { display: flex; gap: 6px; margin-top: 9px; }
+.narration-actions button { border: 1px solid var(--ink); background: transparent; padding: 8px; cursor: pointer; font: 700 9px/1 monospace; }
+.narration-actions .primary { flex: 1; background: var(--ink); color: white; }
+.narration-actions button:disabled, .key-field button:disabled { opacity: .35; cursor: not-allowed; }
+.narration-body audio { width: 100%; height: 34px; margin-top: 9px; }
+.disclosure, .narration-status, .codex-capability { margin: 7px 0 0; font: 8px/1.4 monospace; }
+.disclosure { color: var(--rust); }
+.narration-status { min-height: 1.2em; font-weight: 700; }
+.codex-capability { opacity: .6; }
 .block-list { max-height: 250px; overflow: auto; border-block: 1px solid var(--ink); }
 .block-row { display: grid; grid-template-columns: 30px 1fr; gap: 8px; width: 100%; border: 0; border-bottom: 1px solid var(--line); background: transparent; padding: 10px 14px; text-align: left; cursor: pointer; }
 .block-row > span:first-child { font: 10px monospace; opacity: .5; }

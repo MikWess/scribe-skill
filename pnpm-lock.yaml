@@ -8,6 +8,9 @@ importers:
 
   .:
     devDependencies:
+      '@scribe-skill/audio':
+        specifier: workspace:*
+        version: link:packages/audio
       '@scribe-skill/core':
         specifier: workspace:*
         version: link:packages/core
@@ -23,6 +26,12 @@ importers:
 
   apps/local-service:
     dependencies:
+      '@scribe-skill/audio':
+        specifier: workspace:*
+        version: link:../../packages/audio
+      '@scribe-skill/core':
+        specifier: workspace:*
+        version: link:../../packages/core
       '@scribe-skill/pdf-workspace':
         specifier: workspace:*
         version: link:../../packages/pdf-workspace
@@ -67,6 +76,12 @@ importers:
       vite:
         specifier: ^8.2.1
         version: 8.2.1(@types/node@24.13.3)(esbuild@0.28.2)(jiti@2.7.0)
+
+  packages/audio:
+    dependencies:
+      '@scribe-skill/core':
+        specifier: workspace:*
+        version: link:../core
 
   packages/core:
     dependencies:
