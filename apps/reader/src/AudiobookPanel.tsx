@@ -182,10 +182,11 @@ export function AudiobookPanel({ documentId, sections, activeSection, requestJso
   }
 
   return (
-    <details className="audiobook-studio">
-      <summary><span>CITED AUDIOBOOK</span><strong>Package chapters for humans + agents</strong></summary>
+    <details className="audiobook-studio" open>
+      <summary><span>CITED AUDIOBOOK</span><strong>Package sections for humans + agents</strong><small>Dry run → confirm → generate → review → export</small></summary>
       <div className="audiobook-body">
-        <p className="audiobook-safety">Planning is free and local. Starting production sends only the frozen cited chunks to your selected BYOK provider.</p>
+        <p className="component-purpose"><strong>What this does</strong> Turns the guide into independently retryable audio parts plus citations, QC records, rights receipts, and checksums.</p>
+        <p className="audiobook-safety"><strong>What you need:</strong> planning is free and local. Production needs a provider key, a cost ceiling, and permission to synthesize the selected text.</p>
         <fieldset className="production-scope">
           <legend>Production scope</legend>
           <label><input type="radio" checked={scope === "section"} onChange={() => setScope("section")} /> This section · {activeSection.title}</label>

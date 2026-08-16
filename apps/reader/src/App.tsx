@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 
 import { NarrationPanel } from "./NarrationPanel.js";
 import { AudiobookPanel } from "./AudiobookPanel.js";
+import { HomeScreen } from "./HomeScreen.js";
 
 declare global {
   interface Window {
@@ -18,6 +19,8 @@ declare global {
 const API = window.scribeRuntime?.api ?? import.meta.env.VITE_SCRIBE_SKILL_API ?? "http://127.0.0.1:4317";
 const TOKEN = window.scribeRuntime?.token ?? import.meta.env.VITE_SCRIBE_SKILL_TOKEN ?? "local-development-only";
 const LAST_DOCUMENT_KEY = "scribe-skill:last-document";
+type WorkspaceView = "inspect" | "listen" | "produce";
+const WORKSPACE_VIEWS: WorkspaceView[] = ["inspect", "listen", "produce"];
 
 interface DocumentRecord {
   id: string;
@@ -96,6 +99,7 @@ export function App() {
   const [message, setMessage] = useState("Local service ready");
   const [busy, setBusy] = useState(false);
   const [playback, setPlayback] = useState<"idle" | "playing" | "paused">("idle");
+  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("inspect");
   const utteranceRef = useRef<SpeechSynthesisUtterance | undefined>(undefined);
 
   const selected = useMemo(
@@ -349,68 +353,59 @@ export function App() {
     return URL.createObjectURL(await response.blob());
   }
 
+  function goHome() {
+    stopPlayback();
+    window.localStorage.removeItem(LAST_DOCUMENT_KEY);
+    setDocument(undefined);
+    setWorkspaceView("inspect");
+    setMessage("Local service ready");
+  }
+
+  function handleWorkspaceTabKey(event: ReactKeyboardEvent<HTMLButtonElement>, index: number) {
+    let nextIndex: number | undefined;
+    if (event.key === "ArrowRight") nextIndex = (index + 1) % WORKSPACE_VIEWS.length;
+    if (event.key === "ArrowLeft") nextIndex = (index - 1 + WORKSPACE_VIEWS.length) % WORKSPACE_VIEWS.length;
+    if (event.key === "Home") nextIndex = 0;
+    if (event.key === "End") nextIndex = WORKSPACE_VIEWS.length - 1;
+    if (nextIndex === undefined) return;
+    event.preventDefault();
+    const nextView = WORKSPACE_VIEWS[nextIndex];
+    setWorkspaceView(nextView);
+    window.requestAnimationFrame(() => window.document.getElementById(`workspace-tab-${nextView}`)?.focus());
+  }
+
   if (!document) {
     return (
-      <main className="welcome-shell">
-        <section className="welcome-card" aria-labelledby="welcome-title">
-          <div className="eyebrow">LOCAL READING INSTRUMENT · 001</div>
-          <h1 id="welcome-title">Turn a book into navigable context.</h1>
-          <p>
-            Import a local PDF. ScribeSkill preserves the page, reveals uncertain extraction, and gives every
-            insight an exact place to return to.
-          </p>
-          <label className="file-picker">
-            <span>{busy ? "Inspecting source…" : "Choose a PDF"}</span>
-            <input
-              type="file"
-              accept="application/pdf,.pdf"
-              disabled={busy}
-              onChange={(event) => {
-                const file = event.target.files?.[0];
-                if (file) void importFile(file);
-              }}
-            />
-          </label>
-          <div className="or-rule"><span>or open by path</span></div>
-          <label className="path-field">
-            <span>PDF path</span>
-            <input
-              value={pdfPath}
-              onChange={(event) => setPdfPath(event.target.value)}
-              onKeyDown={(event) => event.key === "Enter" && void importPdf()}
-              placeholder="/Users/you/Books/example.pdf"
-              autoFocus
-            />
-          </label>
-          <button className="path-action" onClick={() => void importPdf()} disabled={busy || !pdfPath.trim()}>
-            Open path
-          </button>
-          <div className="privacy-note"><span aria-hidden="true">●</span> Offline import · no model or provider call</div>
-          <p className="status-line" role="status">{message}</p>
-        </section>
-      </main>
+      <HomeScreen
+        busy={busy}
+        message={message}
+        pdfPath={pdfPath}
+        onChooseFile={(file) => void importFile(file)}
+        onOpenPath={() => void importPdf()}
+        onPathChange={setPdfPath}
+      />
     );
   }
 
   return (
     <main className="reader-shell">
       <header className="topbar">
-        <div className="brand">
-          <div className="wordmark">ScribeSkill</div>
+        <button className="brand" onClick={goHome} aria-label="Return to ScribeSkill home">
+          <div className="wordmark"><span aria-hidden="true">S/S</span> ScribeSkill</div>
           <div className="document-title">{document.originalName}</div>
-        </div>
+        </button>
         <div className="source-status" data-quality={inspection?.page.quality}>
           <span aria-hidden="true">●</span> {message}
         </div>
         <div className="top-actions">
-          <button onClick={() => void exportNotes()}>Export cited notes</button>
-          <button onClick={() => { window.localStorage.removeItem(LAST_DOCUMENT_KEY); setDocument(undefined); }}>Close</button>
+          <button onClick={() => void exportNotes()}>Export notes</button>
+          <button onClick={goHome}>Home</button>
         </div>
       </header>
 
       <div className="reader-grid">
         <nav className="section-rail" aria-label="Book sections">
-          <div className="rail-label">CONTEXT MAP</div>
+          <div className="rail-intro"><div className="rail-label">BOOK MAP</div><p>Jump through the source. Rename page ranges into useful chapters as you work.</p></div>
           {sections.map((section) => (
             <button
               key={section.id}
@@ -471,53 +466,71 @@ export function App() {
 
         <aside className="inspector" aria-label="Evidence inspector">
           <div className="inspector-heading">
-            <div className="rail-label">EVIDENCE INSPECTOR</div>
+            <div><div className="rail-label">WORKSPACE</div><strong>{activeSection?.title ?? `Page ${pageNumber}`}</strong></div>
             <span>{inspection ? Math.round(inspection.page.confidence * 100) : 0}% extraction</span>
           </div>
 
-          {activeSection && (
-            <><fieldset className="section-editor">
-              <legend>Navigation guide</legend>
-              <label>Section title<input key={`${activeSection.id}-title`} defaultValue={activeSection.title} onBlur={(event) => void updateSection({ title: event.target.value })} /></label>
-              <div className="range-fields">
-                <label>From<input key={`${activeSection.id}-from`} type="number" min="1" max={document.pageCount} defaultValue={activeSection.startPage} onBlur={(event) => void updateSection({ startPage: Number(event.target.value) })} /></label>
-                <label>To<input key={`${activeSection.id}-to`} type="number" min="1" max={document.pageCount} defaultValue={activeSection.endPage} onBlur={(event) => void updateSection({ endPage: Number(event.target.value) })} /></label>
-              </div>
-            </fieldset>
-            <NarrationPanel section={activeSection} documentName={document.originalName} requestJson={request} fetchArtifact={fetchAudioArtifact} />
-            <AudiobookPanel documentId={document.id} sections={sections} activeSection={activeSection} requestJson={request} /></>
-          )}
-
-          <div className="block-list" aria-label="Extracted reading order">
-            {inspection?.blocks.map((block, index) => (
+          <div className="workspace-tabs" role="tablist" aria-label="Reading workflow">
+            {([
+              ["inspect", "01", "Inspect", "Select, repair, note"],
+              ["listen", "02", "Listen", "Read along or cache"],
+              ["produce", "03", "Produce", "Plan and export"],
+            ] as const).map(([view, number, label, detail], index) => (
               <button
-                key={block.id}
-                className={block.id === selectedId ? "block-row active" : `block-row ${block.status}`}
-                onClick={() => setSelectedId(block.id)}
-                aria-pressed={block.id === selectedId}
-                aria-label={`${block.currentText}; ${block.status}`}
-              >
-                <span>{String(index + 1).padStart(2, "0")}</span>
-                <span>{block.currentText}</span>
-              </button>
+                key={view}
+                id={`workspace-tab-${view}`}
+                role="tab"
+                aria-controls={`workspace-panel-${view}`}
+                aria-selected={workspaceView === view}
+                tabIndex={workspaceView === view ? 0 : -1}
+                onClick={() => setWorkspaceView(view)}
+                onKeyDown={(event) => handleWorkspaceTabKey(event, index)}
+              ><span>{number}</span><strong>{label}</strong><small>{detail}</small></button>
             ))}
           </div>
 
-          {selected ? (
-            <div className="selection-panel">
+          {workspaceView === "inspect" && <div id="workspace-panel-inspect" role="tabpanel" aria-labelledby="workspace-tab-inspect" className="workspace-panel">
+            <div className="workspace-explainer"><span>NO KEY NEEDED</span><h2>Inspect the source.</h2><p>Choose a highlighted region on the page. Repair only the reading copy; every note still cites the immutable extraction.</p></div>
+            {activeSection && <details className="section-editor">
+              <summary>Shape this page into a chapter guide</summary>
+              <div className="section-editor-body">
+                <label>Section title<input key={`${activeSection.id}-title`} defaultValue={activeSection.title} onBlur={(event) => void updateSection({ title: event.target.value })} /></label>
+                <div className="range-fields">
+                  <label>From page<input key={`${activeSection.id}-from`} type="number" min="1" max={document.pageCount} defaultValue={activeSection.startPage} onBlur={(event) => void updateSection({ startPage: Number(event.target.value) })} /></label>
+                  <label>To page<input key={`${activeSection.id}-to`} type="number" min="1" max={document.pageCount} defaultValue={activeSection.endPage} onBlur={(event) => void updateSection({ endPage: Number(event.target.value) })} /></label>
+                </div>
+              </div>
+            </details>}
+            <div className="block-list" aria-label="Extracted reading order">
+              <div className="block-list-heading"><strong>Reading order</strong><span>{inspection?.blocks.length ?? 0} blocks</span></div>
+              {inspection?.blocks.map((block, index) => (
+                <button
+                  key={block.id}
+                  className={block.id === selectedId ? "block-row active" : `block-row ${block.status}`}
+                  onClick={() => setSelectedId(block.id)}
+                  aria-pressed={block.id === selectedId}
+                  aria-label={`${block.currentText}; ${block.status}`}
+                >
+                  <span>{String(index + 1).padStart(2, "0")}</span>
+                  <span>{block.currentText}</span>
+                </button>
+              ))}
+            </div>
+
+            {selected ? <div className="selection-panel">
               <div className="selection-meta">PAGE {selected.pageNumber} · {selected.id.split("-").at(-1)?.toUpperCase()}</div>
               <div className="source-panel">
-                <div>IMMUTABLE EXTRACTED SOURCE · CITED BY NOTES</div>
+                <div>ORIGINAL SOURCE · NEVER OVERWRITTEN</div>
                 <blockquote>{selected.sourceText}</blockquote>
                 {selected.currentText !== selected.sourceText && <span role="status">Reading text has a local repair</span>}
               </div>
-              <textarea
+              <label className="repair-field">Reading copy<textarea
                 aria-label="Repaired reading text"
                 value={selected.currentText}
                 onChange={(event) =>
                   setInspection((current) => current ? { ...current, blocks: current.blocks.map((block) => block.id === selected.id ? { ...block, currentText: event.target.value } : block) } : current)
                 }
-              />
+              /></label>
               <div className="button-row">
                 {playback === "idle" ? <button className="listen" onClick={speakSelection}>Listen to reading text</button> : <button className="listen" onClick={pauseOrResume}>{playback === "playing" ? "Pause" : "Resume"}</button>}
                 {playback !== "idle" && <button onClick={stopPlayback}>Stop</button>}
@@ -530,12 +543,21 @@ export function App() {
                   {selected.status === "included" ? "Exclude" : "Include"}
                 </button>
               </div>
-              <label className="note-field">Your note · cites immutable source<textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="How will you use this context?" /></label>
+              <label className="note-field">Cited note<textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="What does this passage change or support?" /></label>
               <button className="save-note" onClick={() => void saveNote()} disabled={!note.trim()}>Save with evidence</button>
-            </div>
-          ) : (
-            <div className="empty-inspector">Select a source region to inspect or annotate it.</div>
-          )}
+            </div> : <div className="empty-inspector">Select a highlighted source region on the page to inspect it.</div>}
+          </div>}
+
+          {workspaceView === "listen" && activeSection && <div id="workspace-panel-listen" role="tabpanel" aria-labelledby="workspace-tab-listen" className="workspace-panel">
+            <div className="workspace-explainer"><span>DEVICE VOICE IS FREE</span><h2>Listen beside the page.</h2><p>Preview locally with no key. Add OpenAI or ElevenLabs only when you want to generate and cache a reusable audio file.</p></div>
+            <NarrationPanel section={activeSection} documentName={document.originalName} requestJson={request} fetchArtifact={fetchAudioArtifact} />
+          </div>}
+
+          {workspaceView === "produce" && activeSection && <div id="workspace-panel-produce" role="tabpanel" aria-labelledby="workspace-tab-produce" className="workspace-panel">
+            <div className="workspace-explainer"><span>PLAN LOCALLY · SPEND DELIBERATELY</span><h2>Produce a cited package.</h2><p>Create a free dry run first. Provider calls stay locked until you confirm the exact chunks, budget, and rights scope.</p></div>
+            <button className="inline-route" onClick={() => setWorkspaceView("listen")}>Need a provider key? Configure it in Listen <span aria-hidden="true">→</span></button>
+            <AudiobookPanel documentId={document.id} sections={sections} activeSection={activeSection} requestJson={request} />
+          </div>}
         </aside>
       </div>
     </main>

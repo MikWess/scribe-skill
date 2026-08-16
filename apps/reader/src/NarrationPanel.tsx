@@ -303,8 +303,9 @@ export function NarrationPanel({ section, documentName, requestJson, fetchArtifa
 
   return (
     <details className="narration-studio" open>
-      <summary><span>NARRATED SECTION</span><strong>{section.title}</strong></summary>
+      <summary><span>SECTION VOICE</span><strong>{section.title}</strong><small>Choose free preview or generated audio</small></summary>
       <div className="narration-body">
+        <p className="component-purpose"><strong>What this does</strong> Keeps narration tied to the current section and its evidence anchors. Editing the reading script never changes the original source.</p>
         <div className="provider-tabs" role="group" aria-label="Voice provider">
           {(["device", "openai", "elevenlabs"] as const).map((candidate) => {
             const capability = capabilities?.voices.find(({ provider: id }) => id === candidate);
@@ -322,7 +323,7 @@ export function NarrationPanel({ section, documentName, requestJson, fetchArtifa
           <span>{provider === "device" ? "No API key · preview only" : currentCapability?.available ? `BYOK configured${currentCapability.maxCharacters ? ` · ≤ ${currentCapability.maxCharacters.toLocaleString()} chars` : ""}` : currentCapability?.reason}</span>
         </div>
 
-        <label className="script-field">Reading script · source remains immutable
+        <label className="script-field">What the voice will read
           <textarea value={readingText} onChange={(event) => setReadingText(event.target.value)} />
         </label>
         <div className="script-preview" aria-live="polite">
@@ -333,7 +334,7 @@ export function NarrationPanel({ section, documentName, requestJson, fetchArtifa
 
         {provider === "device" ? (
           <>
-            <label className="voice-field">Device voice
+            <label className="voice-field">Voice installed on this device
               <select value={voice} onChange={(event) => setVoice(event.target.value)}>
                 {deviceVoices.map((candidate) => <option key={candidate.voiceURI} value={candidate.voiceURI}>{candidate.name} · {candidate.lang}</option>)}
               </select>
