@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { app, BrowserWindow, ipcMain, protocol, safeStorage, session, type IpcMainInvokeEvent } from "electron";
 
 import { startLocalService, type LocalServiceHandle } from "../../local-service/src/server.ts";
+import { contentTypeForPath } from "./content-type.ts";
 import { isTrustedRendererUrl, ProviderSecretStore, parseProviderName } from "./secret-store.ts";
 
 protocol.registerSchemesAsPrivileged([
@@ -91,7 +92,9 @@ async function createWindow(): Promise<void> {
     if (!target.startsWith(`${readerRoot}/`) && target !== join(readerRoot, "index.html")) {
       return new Response("Not found", { status: 404 });
     }
-    return new Response(await readFile(target));
+    return new Response(await readFile(target), {
+      headers: { "content-type": contentTypeForPath(target) },
+    });
   });
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
     callback({
