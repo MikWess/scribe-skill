@@ -7,3 +7,5 @@ The planned matrix covers clean digital text, two-column layout, scanned pages, 
 Run `pnpm fixtures:generate work/fixtures` to create the current local set: a two-column evidence fixture, an image-only OCR blocker, and a four-page semantic-chapter fixture with a table of contents. Generated PDFs under `work/` are intentionally untracked.
 
 CI scans tracked fixture text for common secrets and PII. False positives require replacing the value with an explicit example-domain/dummy value; fixture exceptions are reviewed rather than silently allowlisted.
+
+`retrieval-evaluation.json` contains 20 frozen synthetic relevance judgments for deterministic cited-search regression tests.

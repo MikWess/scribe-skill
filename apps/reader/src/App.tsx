@@ -19,14 +19,15 @@ declare global {
 const API = window.scribeRuntime?.api ?? import.meta.env.VITE_SCRIBE_SKILL_API ?? "http://127.0.0.1:4317";
 const TOKEN = window.scribeRuntime?.token ?? import.meta.env.VITE_SCRIBE_SKILL_TOKEN ?? "local-development-only";
 const LAST_DOCUMENT_KEY = "scribe-skill:last-document";
-type WorkspaceView = "inspect" | "listen" | "produce";
-const WORKSPACE_VIEWS: WorkspaceView[] = ["inspect", "listen", "produce"];
+type WorkspaceView = "inspect" | "search" | "listen" | "produce";
+const WORKSPACE_VIEWS: WorkspaceView[] = ["inspect", "search", "listen", "produce"];
 
 interface DocumentRecord {
   id: string;
   originalName: string;
   documentHash: string;
   pageCount: number;
+  extractionRevision: number;
   corpusRevision: number;
 }
 
@@ -120,6 +121,49 @@ interface PassagePage {
   nextOffset?: number;
 }
 
+interface SearchResult {
+  rank: number;
+  score: number;
+  scoreExplanation: string;
+  labels: { passage: "source"; ranking: "derived"; snippet: "derived-from-source" };
+  trust: "untrusted-source";
+  passage: {
+    id: string;
+    sectionId: string;
+    sourceText: string;
+    readingText: string;
+    pages: [number, number];
+    quality: Passage["quality"];
+    contentHash: string;
+    extractionRevision: number;
+    structureRevision: number;
+    characterCount: number;
+  };
+  section: { id: string; title: string; kind: Section["kind"]; status: Section["status"]; order: number; pages: [number, number] };
+  snippet: string;
+  matchedTerms: string[];
+  preferredEvidenceId: string;
+  evidence: Passage["evidence"];
+}
+
+interface SearchResponse {
+  schemaVersion: "1";
+  query: string;
+  outcome: "matches" | "no-match" | "budget-exhausted";
+  normalizedTerms: string[];
+  document: { id: string; hash: string; corpusRevision: number; extractionRevision: number };
+  appliedFilters: { sectionIds: string[]; reviewStates: Section["status"][]; visual: string };
+  contextBudget: {
+    unit: "source-text-characters";
+    maxCharacters: number;
+    usedCharacters: number;
+    omittedResultCount: number;
+    exhausted: boolean;
+    minimumRequiredCharacters?: number;
+  };
+  results: SearchResult[];
+}
+
 class ApiError extends Error {
   constructor(readonly status: number, message: string) {
     super(message);
@@ -162,7 +206,13 @@ export function App() {
   const [playback, setPlayback] = useState<"idle" | "playing" | "paused">("idle");
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("inspect");
   const [splitPage, setSplitPage] = useState(2);
+  const [searchText, setSearchText] = useState("");
+  const [searchSectionId, setSearchSectionId] = useState("");
+  const [searchProposed, setSearchProposed] = useState(false);
+  const [searchResponse, setSearchResponse] = useState<SearchResponse>();
+  const [searchBusy, setSearchBusy] = useState(false);
   const utteranceRef = useRef<SpeechSynthesisUtterance | undefined>(undefined);
+  const searchResultsRef = useRef<HTMLDivElement | null>(null);
 
   const selected = useMemo(
     () => inspection?.blocks.find(({ id }) => id === selectedId),
@@ -178,6 +228,14 @@ export function App() {
   const activeSectionIndex = activeSection ? sections.findIndex(({ id }) => id === activeSection.id) : -1;
   const nextSection = activeSectionIndex >= 0 ? sections.slice(activeSectionIndex + 1).find(({ status }) => status !== "excluded") : undefined;
   const activePassages = activeSection ? passages.filter(({ sectionId }) => sectionId === activeSection.id) : [];
+
+  useEffect(() => {
+    if (!searchSectionId) return;
+    const section = sections.find(({ id }) => id === searchSectionId);
+    if (!section || section.status === "excluded" || (section.status === "proposed" && !searchProposed)) {
+      setSearchSectionId("");
+    }
+  }, [searchProposed, searchSectionId, sections]);
 
   const loadPage = useCallback(
     async (documentId: string, page: number, preferredBlock?: string) => {
@@ -209,6 +267,7 @@ export function App() {
       setSelectedSectionId(result.sections.find(({ status }) => status !== "excluded")?.id ?? result.sections[0]?.id);
       setPassages([]);
       setCorpusSummary(result.summary);
+      setSearchResponse(undefined);
       const [progress, notes] = await Promise.all([
         request<{ pageNumber: number; blockId?: string } | null>(`/api/documents/${result.document.id}/progress`),
         request<Annotation[]>(`/api/documents/${result.document.id}/annotations`),
@@ -225,6 +284,7 @@ export function App() {
     }
     setPassages([]);
     setCorpusSummary(corpus.summary);
+    setSearchResponse(undefined);
   }
 
   async function reportMutationError(error: unknown, fallback: string) {
@@ -530,6 +590,55 @@ export function App() {
     return URL.createObjectURL(await response.blob());
   }
 
+  async function runSearch() {
+    if (!document || !searchText.trim()) return;
+    setSearchBusy(true);
+    try {
+      const result = await request<SearchResponse>("/api/search/query", {
+        method: "POST",
+        body: JSON.stringify({
+          documentId: document.id,
+          query: searchText.trim(),
+          sourceRevision: {
+            documentHash: document.documentHash,
+            corpusRevision: corpusSummary?.structureRevision ?? document.corpusRevision,
+            extractionRevision: document.extractionRevision,
+          },
+          filters: {
+            sectionIds: searchSectionId ? [searchSectionId] : undefined,
+            reviewStates: searchProposed ? ["accepted", "proposed"] : ["accepted"],
+          },
+          limit: 10,
+          contextBudget: { maxCharacters: 6_000 },
+        }),
+      });
+      setSearchResponse(result);
+      const status = result.outcome === "matches"
+        ? `${result.results.length} cited result${result.results.length === 1 ? "" : "s"}`
+        : result.outcome === "budget-exhausted"
+          ? `No whole passage fits the 6,000-character context budget`
+          : `No accepted source passage matched`;
+      setMessage(status);
+      window.requestAnimationFrame(() => searchResultsRef.current?.focus());
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) await refreshCorpus(document.id);
+      setMessage(error instanceof Error ? error.message : "Search failed");
+    } finally {
+      setSearchBusy(false);
+    }
+  }
+
+  async function openSearchAnchor(result: SearchResult, anchor: SearchResult["evidence"][number]) {
+    if (!document) return;
+    if (result.section.status === "excluded") {
+      setMessage("This result no longer belongs to a searchable section");
+      return;
+    }
+    setSelectedSectionId(result.section.id);
+    await loadPage(document.id, anchor.page, anchor.blockId);
+    setMessage(`Opened cited source on page ${anchor.page}`);
+  }
+
   function goHome() {
     stopPlayback();
     window.localStorage.removeItem(LAST_DOCUMENT_KEY);
@@ -538,6 +647,10 @@ export function App() {
     setSelectedSectionId(undefined);
     setPassages([]);
     setCorpusSummary(undefined);
+    setSearchText("");
+    setSearchSectionId("");
+    setSearchProposed(false);
+    setSearchResponse(undefined);
     setWorkspaceView("inspect");
     setMessage("Local service ready");
   }
@@ -669,8 +782,9 @@ export function App() {
           <div className="workspace-tabs" role="tablist" aria-label="Reading workflow">
             {([
               ["inspect", "01", "Inspect", "Select, repair, note"],
-              ["listen", "02", "Listen", "Read along or cache"],
-              ["produce", "03", "Produce", "Plan and export"],
+              ["search", "02", "Find", "Search cited source"],
+              ["listen", "03", "Listen", "Read along or cache"],
+              ["produce", "04", "Produce", "Plan and export"],
             ] as const).map(([view, number, label, detail], index) => (
               <button
                 key={view}
@@ -788,6 +902,80 @@ export function App() {
               <label className="note-field">Cited note<textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="What does this passage change or support?" /></label>
               <button className="save-note" onClick={() => void saveNote()} disabled={!note.trim()}>Save with evidence</button>
             </div> : <div className="empty-inspector">Select a highlighted source region on the page to inspect it.</div>}
+          </div>}
+
+          {workspaceView === "search" && <div id="workspace-panel-search" role="tabpanel" aria-labelledby="workspace-tab-search" className="workspace-panel search-workspace">
+            <div className="workspace-explainer search-explainer"><span>LOCAL FTS · NO KEY</span><h2>Find the author’s words.</h2><p>Search immutable source passages, then open the exact cited block on the page. Ranking and snippets are derived navigation aids—not claims from the book.</p></div>
+            <form className="search-console" onSubmit={(event) => { event.preventDefault(); void runSearch(); }}>
+              <label className="search-query-label" htmlFor="book-search-query">Search this book</label>
+              <div className="search-query-row">
+                <input
+                  id="book-search-query"
+                  type="search"
+                  value={searchText}
+                  onChange={(event) => setSearchText(event.target.value)}
+                  placeholder="e.g. diagnosing the central challenge"
+                  autoComplete="off"
+                />
+                <button type="submit" disabled={searchBusy || !searchText.trim()}>{searchBusy ? "Searching…" : "Find evidence"}</button>
+              </div>
+              <div className="search-filters">
+                <label>Chapter
+                  <select value={searchSectionId} onChange={(event) => setSearchSectionId(event.target.value)}>
+                    <option value="">All reviewed chapters</option>
+                    {sections.filter(({ status }) => status === "accepted" || (searchProposed && status === "proposed")).map((section) => <option key={section.id} value={section.id}>{section.title} · {section.status}</option>)}
+                  </select>
+                </label>
+                <label className="search-review-toggle"><input type="checkbox" checked={searchProposed} onChange={(event) => setSearchProposed(event.target.checked)} /> Include proposed boundaries</label>
+              </div>
+              <p className="search-contract-note">Accepted passages only by default · whole passages within 6,000 source characters · zero network requests</p>
+            </form>
+
+            {!sections.some(({ status }) => status === "accepted") && !searchProposed && <div className="search-empty search-gate">
+              <strong>Accept at least one chapter boundary to search it.</strong>
+              <p>Or explicitly include proposed boundaries above while you are still reviewing the book map.</p>
+            </div>}
+
+            {searchResponse && <div className="search-results" ref={searchResultsRef} tabIndex={-1} aria-label="Cited search results">
+              <div className="search-results-head">
+                <div><span>QUERY / {searchResponse.query}</span><strong>{searchResponse.results.length} cited result{searchResponse.results.length === 1 ? "" : "s"}</strong></div>
+                <button onClick={() => setSearchResponse(undefined)}>Clear</button>
+              </div>
+              <div className="search-budget" data-exhausted={searchResponse.contextBudget.exhausted}>
+                <span>{searchResponse.contextBudget.usedCharacters.toLocaleString()} / {searchResponse.contextBudget.maxCharacters.toLocaleString()} source characters</span>
+                <span>Corpus r{searchResponse.document.corpusRevision} · extraction r{searchResponse.document.extractionRevision}</span>
+              </div>
+              {searchResponse.outcome === "no-match" && <div className="search-empty"><strong>No cited passage matched these filters.</strong><p>Try a term from the book, another chapter, or explicitly include proposed boundaries. Search never invents an answer.</p></div>}
+              {searchResponse.outcome === "budget-exhausted" && <div className="search-empty"><strong>The best matching passage is larger than this context budget.</strong><p>No partial citation was returned. The agent API reports the minimum whole-passage size required.</p></div>}
+              {searchResponse.results.map((result) => <article className="search-result" key={result.passage.id} data-quality={result.passage.quality}>
+                <header>
+                  <span className="search-rank">{String(result.rank).padStart(2, "0")}</span>
+                  <div><h3>{result.section.title}</h3><p>{result.section.kind} · pp. {result.passage.pages[0]}–{result.passage.pages[1]} · {result.section.status}</p></div>
+                  <span className="search-quality">{result.passage.quality}</span>
+                </header>
+                <div className="search-labels"><span>DERIVED SNIPPET FROM SOURCE</span><span>FULL SOURCE BELOW</span><span>DERIVED RANK</span><span>UNTRUSTED BOOK TEXT</span></div>
+                <blockquote aria-label="Derived search snippet from source passage">{result.snippet}</blockquote>
+                <p className="search-why">{result.scoreExplanation}</p>
+                <p className="search-quote-cue">Open the immutable source before quoting.</p>
+                <button className="search-open-primary" onClick={() => {
+                  const preferred = result.evidence.find(({ id }) => id === result.preferredEvidenceId) ?? result.evidence[0];
+                  if (preferred) void openSearchAnchor(result, preferred);
+                }} disabled={!result.evidence.length}>Open best matching highlight <span aria-hidden="true">→</span></button>
+                <details className="search-source-detail">
+                  <summary>Inspect full source, reading copy, and {result.evidence.length} anchor{result.evidence.length === 1 ? "" : "s"}</summary>
+                  <div className="passage-copy-compare">
+                    <div><strong>Immutable source</strong><p>{result.passage.sourceText}</p></div>
+                    <div><strong>Reading copy {result.passage.readingText === result.passage.sourceText ? "· unchanged" : "· locally repaired"}</strong><p>{result.passage.readingText}</p></div>
+                  </div>
+                  <div className="passage-integrity"><span>Content</span><code title={result.passage.contentHash}>{result.passage.contentHash}</code><span>Extraction r{result.passage.extractionRevision} · section r{result.passage.structureRevision}</span></div>
+                  <div className="anchor-list" aria-label={`Evidence anchors for ${result.section.title}`}>
+                    {result.evidence.map((anchor) => <button key={anchor.id} onClick={() => void openSearchAnchor(result, anchor)} title={`${anchor.contentHash} · characters ${anchor.characterRange.start}–${anchor.characterRange.end}`}>
+                      <strong>Page {anchor.page}</strong><span>{anchor.blockId}</span><small>chars {anchor.characterRange.start}–{anchor.characterRange.end} · open exact highlight →</small>
+                    </button>)}
+                  </div>
+                </details>
+              </article>)}
+            </div>}
           </div>}
 
           {workspaceView === "listen" && activeNarrationSection && <div id="workspace-panel-listen" role="tabpanel" aria-labelledby="workspace-tab-listen" className="workspace-panel">

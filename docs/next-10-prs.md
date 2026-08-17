@@ -1,6 +1,6 @@
 # ScribeSkill: the next 10 pull requests
 
-Status: proposed execution roadmap after the current PR #6 → PR #7 merge train
+Status: in progress; PR #8 is open and PR #9 is implemented as a stacked change
 Last updated: 2026-08-17
 
 ## Outcome
@@ -137,6 +137,10 @@ Make the book searchable as evidence before adding generative answers.
 ### Is this genuinely useful?
 
 A reader can find where the author develops an idea and inspect the original wording in one step. An agent can acquire bounded, source-linked context without an LLM or API key.
+
+### Implementation note — 2026-08-17
+
+Implemented as the next stacked slice: a revision-pinned `search.query` contract, incremental SQLite FTS5 source index, exact evidence inspector, explicit accepted/proposed scope, whole-passage character budgets, injection-shaped fixture coverage, and a frozen 20-query evaluation. The private *Good Strategy/Bad Strategy* golden-book run remains a local verification step because that PDF was not found in the workspace or indexed device search.
 
 ## PR #10 — Add bounded AI execution, grounded Q&A, and saved insights
 

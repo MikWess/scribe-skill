@@ -17,7 +17,7 @@ The exported skill is a navigation guide, not a static summary. Given a task, it
 
 ## Status
 
-Early implementation. The evidence/navigation foundation, deterministic local PDF workspace, accessible reader, and cited audiobook production are merged. The current stacked slice adds a versioned semantic corpus: detected chapter proposals, table-of-contents signals, stable cited passages, local review/edit controls, and explicit OCR blockers. Read the [PRD](docs/PRD.md), [next 10 PR roadmap](docs/next-10-prs.md), [semantic corpus decision](docs/adr/0006-semantic-corpus.md), and [70+ source market research](docs/market-research.md).
+Early implementation. The evidence/navigation foundation, deterministic local PDF workspace, accessible reader, and cited audiobook production are merged. The current stacked slices add a versioned semantic corpus and local cited retrieval: detected chapter proposals, stable source passages, exact page-region evidence, local review controls, and explicit OCR blockers. Read the [PRD](docs/PRD.md), [next 10 PR roadmap](docs/next-10-prs.md), [semantic corpus decision](docs/adr/0006-semantic-corpus.md), [retrieval decision](docs/adr/0007-local-cited-retrieval.md), and [70+ source market research](docs/market-research.md).
 
 ## Developer quick start
 
@@ -34,6 +34,25 @@ pnpm --filter @scribe-skill/reader dev:stack
 The inspection command stores the source by hash, extracts blocks into SQLite, proposes semantic chapters, builds citation-ready passages, renders page 1 to PNG, reports page quality, and prints source text with evidence coordinates. Image-only PDFs are marked `ocr-required` and receive no fabricated passages. Corpus-changing API calls use optimistic revision checks, and paid audio generation accepts only reviewed section boundaries.
 
 Agent passage reads are bounded and lazy: `GET /api/documents/:id/passages?sectionId=:sectionId&limit=100&offset=0` returns `{ items, nextOffset }`. Opening or refreshing a book returns its summary and section map without eagerly serializing every passage and evidence anchor.
+
+Local cited retrieval needs no provider, API key, embedding service, or network access. `POST /api/search/query` searches immutable source passages with SQLite FTS5 and returns whole passages, full evidence anchors, a preferred exact highlight, review/quality labels, and derived ranking explanations. Calls must pin the expected corpus revision; accepted chapters are the default and proposed boundaries require explicit opt-in.
+
+```json
+{
+  "documentId": "doc-…",
+  "query": "diagnosing the central challenge",
+  "filters": { "reviewStates": ["accepted"], "visual": "any" },
+  "limit": 5,
+  "contextBudget": { "maxCharacters": 6000 },
+  "sourceRevision": {
+    "documentHash": "sha256:…",
+    "corpusRevision": 3,
+    "extractionRevision": 1
+  }
+}
+```
+
+The response outcome is `matches`, `no-match`, or `budget-exhausted`. Source text is labeled untrusted data; snippets and scores are labeled derived. An agent should use `preferredEvidenceId` for the best matching block or inspect the complete `evidence` array before making a claim.
 
 The reader command starts the loopback-only local service and browser UI at `http://localhost:5173`. It uses an explicitly enabled development token; direct service use requires `SCRIBE_SKILL_TOKEN`. The Electron desktop host starts the same service itself on a random port with an ephemeral token, so `pnpm --filter @scribe-skill/reader desktop:dev` needs no separate server process. Build an unpacked desktop app for the current platform with `pnpm --filter @scribe-skill/reader desktop:build`.
 

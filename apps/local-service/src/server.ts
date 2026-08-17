@@ -15,8 +15,8 @@ import { AudiobookWorkspace } from "@scribe-skill/audiobook";
 import type { CreateAudiobookPlanInput, ProductionChunk } from "@scribe-skill/audiobook";
 import { getCodexCapability, sha256 } from "@scribe-skill/core";
 import type { Capability, EvidenceAnchor } from "@scribe-skill/core";
-import { CorpusRevisionConflictError, PdfWorkspace } from "@scribe-skill/pdf-workspace";
-import type { DocumentSection } from "@scribe-skill/pdf-workspace";
+import { CorpusRevisionConflictError, PdfWorkspace, SourceRevisionConflictError } from "@scribe-skill/pdf-workspace";
+import type { DocumentSection, SearchQuery } from "@scribe-skill/pdf-workspace";
 
 const insecureDevelopmentToken = "local-development-only";
 
@@ -292,6 +292,10 @@ const server = createServer(async (request, response) => {
           offset,
         }),
       );
+    }
+    if (request.method === "POST" && url.pathname === "/api/search/query") {
+      const input = await body(request);
+      return send(response, 200, await workspace.searchQuery(input as unknown as SearchQuery));
     }
     const sectionMatch = url.pathname.match(/^\/api\/sections\/([^/]+)$/);
     const sectionSplitMatch = url.pathname.match(/^\/api\/sections\/([^/]+)\/split$/);
@@ -649,6 +653,12 @@ const server = createServer(async (request, response) => {
     return send(response, 404, { error: "Not found" });
   } catch (error) {
     if (error instanceof CorpusRevisionConflictError) {
+      return send(response, 409, {
+        error: error.message,
+        current: workspace.corpusSummary(error.documentId),
+      });
+    }
+    if (error instanceof SourceRevisionConflictError) {
       return send(response, 409, {
         error: error.message,
         current: workspace.corpusSummary(error.documentId),

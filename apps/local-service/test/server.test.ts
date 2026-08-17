@@ -108,6 +108,25 @@ test("serves a token-protected, cited reader workflow over loopback", async (t) 
     { status: accepted.status, origin: accepted.origin, title: accepted.title },
     { status: "accepted", origin: "user", title: "Evidence foundation" },
   );
+  const searchResponse = await fetch(`${service.url}/api/search/query`, {
+    method: "POST",
+    headers: { origin, "content-type": "application/json", "x-scribe-token": token },
+    body: JSON.stringify({
+      documentId: result.document.id,
+      query: "evidence source",
+      sourceRevision: {
+        documentHash: result.document.documentHash,
+        corpusRevision: corpus.summary.structureRevision + 1,
+        extractionRevision: 1,
+      },
+      limit: 5,
+      contextBudget: { maxCharacters: 2_000 },
+    }),
+  });
+  assert.equal(searchResponse.status, 200);
+  const search = await searchResponse.json() as { schemaVersion: string; results: Array<{ evidence: Array<{ blockId: string }> }> };
+  assert.equal(search.schemaVersion, "1");
+  assert.equal(search.results[0]?.evidence[0]?.blockId, inspection.blocks[0]!.id);
   const staleMutation = await fetch(`${service.url}/api/sections/${section[0]!.id}`, {
     method: "PATCH",
     headers: { origin, "content-type": "application/json", "x-scribe-token": token },
@@ -157,6 +176,18 @@ test("rejects corpus, section, and passage reads after source-asset tampering", 
   const narration = await fetch(`${service.url}/api/sections/${imported.sections[0]!.id}/narration-script`, { headers });
   assert.equal(narration.status, 400);
   assert.match((await narration.json() as { error: string }).error, /hash does not match/i);
+  const search = await fetch(`${service.url}/api/search/query`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      documentId: imported.document.id,
+      query: "integrity",
+      sourceRevision: { corpusRevision: 1 },
+      contextBudget: { maxCharacters: 1_000 },
+    }),
+  });
+  assert.equal(search.status, 400);
+  assert.match((await search.json() as { error: string }).error, /hash does not match/i);
 });
 
 test("builds cited section scripts and caches a provider artifact without a real API key", async (t) => {

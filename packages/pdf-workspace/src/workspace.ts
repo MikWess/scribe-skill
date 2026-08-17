@@ -20,6 +20,19 @@ import {
   type DocumentSection,
   type ProposedSection,
 } from "./corpus.ts";
+import {
+  evidenceMatchesVisualFilter,
+  ftsSearchExpression,
+  matchedSearchTerms,
+  normalizedSearchTerms,
+  plainSearchSnippet,
+  type SearchQuality,
+  type SearchQuery,
+  type SearchReviewState,
+  type SearchResponse,
+  type SearchResult,
+  type VisualFilter,
+} from "./retrieval.ts";
 
 export type PageQuality = "good" | "review-needed" | "ocr-required";
 export type BlockStatus = "included" | "excluded" | "rejected";
@@ -66,6 +79,16 @@ export class CorpusRevisionConflictError extends Error {
     this.documentId = documentId;
     this.expectedRevision = expectedRevision;
     this.currentRevision = currentRevision;
+  }
+}
+
+export class SourceRevisionConflictError extends Error {
+  override name = "SourceRevisionConflictError";
+  readonly documentId: string;
+
+  constructor(documentId: string, message: string) {
+    super(message);
+    this.documentId = documentId;
   }
 }
 
@@ -282,7 +305,7 @@ export class PdfWorkspace {
 
   private migrate(): void {
     const version = Number(this.database.prepare("PRAGMA user_version").get()?.user_version ?? 0);
-    if (version > 5) throw new Error(`Workspace schema ${version} is newer than this app supports`);
+    if (version > 6) throw new Error(`Workspace schema ${version} is newer than this app supports`);
     if (version === 0) {
       this.database.exec(`
         BEGIN;
@@ -377,6 +400,13 @@ export class PdfWorkspace {
           UNIQUE(section_id, structure_revision, passage_sequence)
         );
         CREATE INDEX passages_document_section ON passages(document_id, section_id, passage_sequence);
+        CREATE VIRTUAL TABLE passage_search USING fts5(
+          passage_id UNINDEXED,
+          document_id UNINDEXED,
+          section_id UNINDEXED,
+          source_text,
+          tokenize = 'porter unicode61 remove_diacritics 2'
+        );
         CREATE TABLE reading_progress (
           document_id TEXT PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
           page_number INTEGER NOT NULL,
@@ -392,7 +422,7 @@ export class PdfWorkspace {
           content TEXT NOT NULL,
           created_at TEXT NOT NULL
         );
-        PRAGMA user_version = 5;
+        PRAGMA user_version = 6;
         COMMIT;
       `);
     }
@@ -486,6 +516,22 @@ export class PdfWorkspace {
         COMMIT;
       `);
     }
+    if (version > 0 && version < 6) {
+      this.database.exec(`
+        BEGIN;
+        CREATE VIRTUAL TABLE passage_search USING fts5(
+          passage_id UNINDEXED,
+          document_id UNINDEXED,
+          section_id UNINDEXED,
+          source_text,
+          tokenize = 'porter unicode61 remove_diacritics 2'
+        );
+        INSERT INTO passage_search (passage_id, document_id, section_id, source_text)
+        SELECT id, document_id, section_id, source_text FROM passages WHERE status = 'current';
+        PRAGMA user_version = 6;
+        COMMIT;
+      `);
+    }
   }
 
   private corpusBlocks(documentId: string) {
@@ -550,6 +596,7 @@ export class PdfWorkspace {
     const selected = sectionIds ? new Set(sectionIds) : undefined;
     const sections = this.listSections(documentId).filter((section) => !selected || selected.has(section.id));
     for (const section of sections) {
+      this.database.prepare("DELETE FROM passage_search WHERE document_id = ? AND section_id = ?").run(documentId, section.id);
       this.database
         .prepare("UPDATE passages SET status = 'stale' WHERE document_id = ? AND section_id = ? AND status = 'current'")
         .run(documentId, section.id);
@@ -615,6 +662,9 @@ export class PdfWorkspace {
             passage.quality,
             JSON.stringify(passage.evidence),
           );
+        this.database
+          .prepare("INSERT INTO passage_search (passage_id, document_id, section_id, source_text) VALUES (?, ?, ?, ?)")
+          .run(passage.id, documentId, section.id, passage.sourceText);
       }
     }
   }
@@ -1300,6 +1350,188 @@ export class PdfWorkspace {
     return {
       items: rows.slice(0, options.limit).map(normalizePassage),
       nextOffset: hasMore ? options.offset + options.limit : undefined,
+    };
+  }
+
+  async searchQuery(input: SearchQuery): Promise<SearchResponse> {
+    if (!input || typeof input !== "object") throw new Error("A search request is required");
+    if (typeof input.documentId !== "string" || !input.documentId) throw new Error("A documentId is required");
+    const document = this.getDocument(input.documentId);
+    if (!document) throw new Error(`Unknown document: ${input.documentId}`);
+    await this.verifyDocumentAsset(document.id);
+    if (!input.sourceRevision || !Number.isSafeInteger(input.sourceRevision.corpusRevision) || input.sourceRevision.corpusRevision < 1) {
+      throw new Error("sourceRevision.corpusRevision is required");
+    }
+    if (input.sourceRevision.corpusRevision !== document.corpusRevision) {
+      throw new CorpusRevisionConflictError(document.id, input.sourceRevision.corpusRevision, document.corpusRevision);
+    }
+    if (input.sourceRevision.documentHash && input.sourceRevision.documentHash !== document.documentHash) {
+      throw new SourceRevisionConflictError(document.id, "The requested document hash does not match the current source asset");
+    }
+    if (
+      input.sourceRevision.extractionRevision !== undefined &&
+      input.sourceRevision.extractionRevision !== document.extractionRevision
+    ) {
+      throw new SourceRevisionConflictError(document.id, "The requested extraction revision is not available in the current corpus");
+    }
+    if (typeof input.query !== "string" || !input.query.trim()) throw new Error("A non-empty search query is required");
+    if (input.query.length > 500) throw new Error("Search query must be at most 500 characters");
+    const terms = normalizedSearchTerms(input.query);
+    if (terms.length === 0) throw new Error("Search query must contain a word or number");
+
+    const limit = input.limit ?? 5;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20) throw new Error("Search limit must be an integer from 1 to 20");
+    const maxCharacters = input.contextBudget?.maxCharacters ?? 6_000;
+    if (!Number.isSafeInteger(maxCharacters) || maxCharacters < 256 || maxCharacters > 20_000) {
+      throw new Error("Context budget must be an integer from 256 to 20,000 source-text characters");
+    }
+
+    const filters = input.filters ?? {};
+    const sectionIds = [...new Set(filters.sectionIds ?? [])];
+    if (sectionIds.length > 50 || sectionIds.some((id) => typeof id !== "string" || !id)) {
+      throw new Error("At most 50 non-empty section IDs may be filtered");
+    }
+    if (sectionIds.length) {
+      const validSections = this.database
+        .prepare(`SELECT id FROM sections WHERE document_id = ? AND id IN (${sectionIds.map(() => "?").join(",")})`)
+        .all(document.id, ...sectionIds);
+      if (validSections.length !== sectionIds.length) throw new Error("Every section filter must belong to the requested document");
+    }
+    const pageRange = filters.pageRange;
+    if (
+      pageRange &&
+      (!Number.isSafeInteger(pageRange.start) || !Number.isSafeInteger(pageRange.end) || pageRange.start < 1 ||
+        pageRange.end < pageRange.start || pageRange.end > document.pageCount)
+    ) {
+      throw new Error("Search page range is outside the document");
+    }
+    const allowedQualities = new Set<SearchQuality>(["good", "review-needed", "ocr-required"]);
+    const qualities = [...new Set(filters.qualities ?? [...allowedQualities])];
+    if (qualities.length === 0 || qualities.some((quality) => !allowedQualities.has(quality))) throw new Error("Search quality filter is invalid");
+    const allowedReviewStates = new Set<SearchReviewState>(["proposed", "accepted"]);
+    const reviewStates = [...new Set(filters.reviewStates ?? ["accepted"])] as SearchReviewState[];
+    if (reviewStates.length === 0 || reviewStates.some((status) => !allowedReviewStates.has(status))) throw new Error("Search review-state filter is invalid");
+    const allowedVisuals = new Set<VisualFilter>(["any", "present", "figure", "table", "unknown"]);
+    const visual = filters.visual ?? "any";
+    if (!allowedVisuals.has(visual)) throw new Error("Search visual filter is invalid");
+    if (
+      filters.extractionRevision !== undefined &&
+      (!Number.isSafeInteger(filters.extractionRevision) || filters.extractionRevision < 1)
+    ) throw new Error("Search extraction revision filter is invalid");
+
+    const clauses = [
+      "passage_search MATCH ?",
+      "p.document_id = ?",
+      "p.status = 'current'",
+      `p.quality IN (${qualities.map(() => "?").join(",")})`,
+      `s.status IN (${reviewStates.map(() => "?").join(",")})`,
+    ];
+    const parameters: Array<string | number> = [ftsSearchExpression(terms), document.id, ...qualities, ...reviewStates];
+    if (sectionIds.length) {
+      clauses.push(`p.section_id IN (${sectionIds.map(() => "?").join(",")})`);
+      parameters.push(...sectionIds);
+    }
+    if (pageRange) {
+      clauses.push("p.end_page >= ? AND p.start_page <= ?");
+      parameters.push(pageRange.start, pageRange.end);
+    }
+    if (filters.extractionRevision !== undefined) {
+      clauses.push("p.extraction_revision = ?");
+      parameters.push(filters.extractionRevision);
+    }
+    const candidateLimit = Math.min(200, Math.max(limit * 20, 40));
+    const rows = this.database
+      .prepare(
+        `SELECT p.*, s.title AS section_title, s.kind AS section_kind, s.status AS section_status,
+          s.section_order, s.start_page AS section_start_page, s.end_page AS section_end_page,
+          bm25(passage_search, 0, 0, 0, 1) AS lexical_rank
+         FROM passage_search
+         JOIN passages p ON p.id = passage_search.passage_id
+         JOIN sections s ON s.id = p.section_id
+         WHERE ${clauses.join(" AND ")}
+         ORDER BY lexical_rank ASC, s.section_order ASC, p.passage_sequence ASC, p.id ASC
+         LIMIT ?`,
+      )
+      .all(...parameters, candidateLimit);
+
+    let usedCharacters = 0;
+    let omittedResultCount = 0;
+    const budgetExcludedSizes: number[] = [];
+    const results: SearchResult[] = [];
+    for (const row of rows) {
+      const passage = normalizePassage(row);
+      if (!evidenceMatchesVisualFilter(passage.evidence, visual)) continue;
+      if (results.length >= limit) break;
+      if (passage.sourceText.length > maxCharacters - usedCharacters) {
+        omittedResultCount += 1;
+        budgetExcludedSizes.push(passage.sourceText.length);
+        continue;
+      }
+      const matchedTerms = matchedSearchTerms(passage.sourceText, terms);
+      const sourceBlocks = passage.sourceText.split("\n\n");
+      const preferredEvidenceIndex = sourceBlocks.reduce((bestIndex, sourceBlock, index) => {
+        const score = matchedSearchTerms(sourceBlock, terms).length;
+        const bestScore = matchedSearchTerms(sourceBlocks[bestIndex] ?? "", terms).length;
+        return score > bestScore ? index : bestIndex;
+      }, 0);
+      const preferredEvidenceId = passage.evidence[preferredEvidenceIndex]?.id ?? passage.evidence[0]?.id;
+      if (!preferredEvidenceId) continue;
+      results.push({
+        rank: results.length + 1,
+        score: Number(Math.max(0, -Number(row.lexical_rank)).toFixed(8)),
+        scoreExplanation: `${matchedTerms.length} of ${terms.length} normalized query terms matched immutable source text; SQLite FTS5 BM25 ordered this result with stable section and passage tie-breaks.`,
+        labels: { passage: "source", ranking: "derived", snippet: "derived-from-source" },
+        trust: "untrusted-source",
+        passage: {
+          id: passage.id,
+          sectionId: passage.sectionId,
+          sourceText: passage.sourceText,
+          readingText: passage.readingText,
+          pages: [passage.startPage, passage.endPage],
+          quality: passage.quality,
+          contentHash: passage.contentHash,
+          extractionRevision: passage.extractionRevision,
+          structureRevision: passage.structureRevision,
+          characterCount: passage.sourceText.length,
+        },
+        section: {
+          id: passage.sectionId,
+          title: String(row.section_title),
+          kind: String(row.section_kind) as SearchResult["section"]["kind"],
+          status: String(row.section_status) as CorpusSectionStatus,
+          order: Number(row.section_order),
+          pages: [Number(row.section_start_page), Number(row.section_end_page)],
+        },
+        snippet: plainSearchSnippet(passage.sourceText, terms),
+        matchedTerms,
+        preferredEvidenceId,
+        evidence: passage.evidence,
+      });
+      usedCharacters += passage.sourceText.length;
+    }
+
+    const outcome = results.length > 0 ? "matches" : budgetExcludedSizes.length > 0 ? "budget-exhausted" : "no-match";
+    return {
+      schemaVersion: "1",
+      query: input.query.trim(),
+      outcome,
+      normalizedTerms: terms,
+      document: {
+        id: document.id,
+        hash: document.documentHash,
+        corpusRevision: document.corpusRevision,
+        extractionRevision: document.extractionRevision,
+      },
+      appliedFilters: { sectionIds, pageRange, qualities, reviewStates, visual },
+      contextBudget: {
+        unit: "source-text-characters",
+        maxCharacters,
+        usedCharacters,
+        omittedResultCount,
+        exhausted: omittedResultCount > 0,
+        minimumRequiredCharacters: outcome === "budget-exhausted" ? Math.min(...budgetExcludedSizes) : undefined,
+      },
+      results,
     };
   }
 
