@@ -90,6 +90,10 @@ Readers who want to move fluidly between page, audio, note-taking, and deep inqu
 
 - Provider registry stores local configuration metadata; secrets use OS secure storage, never SQLite plaintext.
 - OpenAI-compatible chat/embedding connector is the first LLM interface. Custom endpoints and models are supported.
+- Local lexical retrieval over immutable source passages works without a provider, key, embedding service, or network access.
+- `search.query` requires a source revision and accepts bounded chapter/page/quality/review/visual filters, result limit, and source-character context budget.
+- Search returns whole passages with complete evidence anchors, a preferred exact page-region highlight, extraction quality, visible review state, and explicit source-vs-derived labels. Book text is untrusted data, never agent instruction.
+- Accepted chapters are the default retrieval scope. Proposed boundaries require explicit opt-in; excluded passages are not current evidence.
 - Answers display citations and distinguish book evidence from model synthesis.
 - Users can create, search, export, and delete local notes/insights.
 - Annotations preserve exact source selections and export as Markdown plus structured evidence data; annotations distinguish source, model-derived, and user-authored content.

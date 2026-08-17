@@ -147,7 +147,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .inspector-heading { position: sticky; top: 0; z-index: 6; display: flex; justify-content: space-between; align-items: center; min-height: 66px; padding: 13px 18px; background: var(--paper); border-bottom: 1px solid var(--ink); }
 .inspector-heading strong { display: block; max-width: 280px; margin-top: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 17px/1 "Iowan Old Style", Baskerville, serif; }
 .inspector-heading > span { font: 10px monospace; }
-.workspace-tabs { position: sticky; top: 66px; z-index: 5; display: grid; grid-template-columns: repeat(3, 1fr); background: var(--paper); border-bottom: 1px solid var(--ink); }
+.workspace-tabs { position: sticky; top: 66px; z-index: 5; display: grid; grid-template-columns: repeat(4, 1fr); background: var(--paper); border-bottom: 1px solid var(--ink); }
 .workspace-tabs button { min-width: 0; display: grid; gap: 3px; padding: 12px 10px 13px; border: 0; border-right: 1px solid var(--line); background: transparent; text-align: left; cursor: pointer; }
 .workspace-tabs button:last-child { border-right: 0; }
 .workspace-tabs button > span { color: var(--muted); font: 700 7px/1 monospace; }
@@ -197,6 +197,52 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .anchor-list button:hover, .anchor-list button:focus-visible { border-color: var(--blue); background: rgba(65,89,213,.07); }
 .anchor-list strong, .anchor-list span, .anchor-list small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 7px/1.35 monospace; }
 .anchor-list small { color: var(--blue); }
+.search-workspace { min-height: 100%; background: linear-gradient(180deg, rgba(65,89,213,.05), transparent 360px); }
+.search-explainer { background: linear-gradient(135deg, rgba(65,89,213,.16), rgba(220,255,99,.2) 72%, transparent); }
+.search-console { display: grid; gap: 10px; margin: 14px; padding: 14px; border: 1px solid var(--ink); background: #fffdf7; box-shadow: 5px 5px 0 rgba(20,37,31,.12); }
+.search-query-label { font: 800 9px/1 monospace; letter-spacing: .12em; text-transform: uppercase; }
+.search-query-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
+.search-query-row input { min-width: 0; border: 1px solid var(--ink); border-right: 0; background: transparent; padding: 12px; font: 15px/1.2 "Iowan Old Style", serif; }
+.search-query-row button { border: 1px solid var(--ink); background: var(--ink); color: white; padding: 0 13px; cursor: pointer; font: 800 8px/1.2 monospace; text-transform: uppercase; }
+.search-query-row button:hover:not(:disabled), .search-query-row button:focus-visible { background: var(--acid); color: var(--ink); }
+.search-query-row button:disabled { opacity: .38; cursor: default; }
+.search-filters { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: end; }
+.search-filters > label:first-child { display: grid; gap: 4px; font: 700 8px/1.2 monospace; text-transform: uppercase; }
+.search-filters select { min-width: 0; width: 100%; border: 1px solid var(--line); background: var(--paper); padding: 7px; font: 10px/1.2 monospace; }
+.search-review-toggle { display: flex; gap: 6px; align-items: center; padding-bottom: 7px; font: 8px/1.3 monospace; }
+.search-review-toggle input { flex: none; }
+.search-contract-note { margin: 0; color: var(--muted); font: 7px/1.4 monospace; text-transform: uppercase; }
+.search-results { margin: 14px; border: 1px solid var(--ink); background: var(--paper); }
+.search-results:focus-visible { outline: 3px solid var(--blue); outline-offset: 3px; }
+.search-results-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 11px; background: var(--ink); color: var(--paper); }
+.search-results-head div { display: grid; gap: 4px; }
+.search-results-head span { color: var(--acid); font: 700 7px/1 monospace; letter-spacing: .09em; }
+.search-results-head strong { font: 600 17px/1 "Iowan Old Style", serif; }
+.search-results-head button { border: 1px solid rgba(255,255,255,.5); background: transparent; color: inherit; padding: 6px 8px; cursor: pointer; font: 7px/1 monospace; text-transform: uppercase; }
+.search-budget { display: flex; justify-content: space-between; gap: 8px; padding: 7px 10px; border-bottom: 1px solid var(--line); background: rgba(220,255,99,.28); font: 7px/1.3 monospace; }
+.search-budget[data-exhausted="true"] { background: rgba(200,81,50,.12); }
+.search-empty { margin: 14px; padding: 16px; border: 1px dashed var(--rust); background: rgba(200,81,50,.06); }
+.search-empty strong { display: block; font: 600 18px/1.1 "Iowan Old Style", serif; }
+.search-empty p { margin: 7px 0 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.search-gate { border-color: var(--blue); background: rgba(65,89,213,.06); }
+.search-result { border-bottom: 1px solid var(--ink); background: #fffdf7; }
+.search-result:last-child { border-bottom: 0; }
+.search-result > header { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; gap: 9px; align-items: start; padding: 12px 10px 8px; }
+.search-rank { display: grid; place-items: center; width: 28px; height: 28px; border: 1px solid var(--ink); background: var(--acid); font: 800 9px/1 monospace; }
+.search-result h3 { margin: 0; font: 600 18px/1.1 "Iowan Old Style", serif; }
+.search-result header p { margin: 4px 0 0; color: var(--muted); font: 7px/1.3 monospace; text-transform: uppercase; }
+.search-quality { padding: 5px 6px; border: 1px solid var(--line); font: 700 6px/1 monospace; text-transform: uppercase; }
+.search-result[data-quality="review-needed"] .search-quality { border-color: #c48418; color: #875807; }
+.search-result[data-quality="ocr-required"] .search-quality { border-color: var(--rust); color: var(--rust); }
+.search-labels { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 10px 8px 49px; }
+.search-labels span { padding: 4px 5px; background: rgba(20,37,31,.08); font: 700 6px/1 monospace; letter-spacing: .05em; }
+.search-result > blockquote { margin: 0; padding: 14px 14px 14px 49px; border-block: 1px solid var(--line); background: rgba(65,89,213,.045); font: 15px/1.5 "Iowan Old Style", serif; }
+.search-why { margin: 0; padding: 9px 12px; color: var(--muted); font: 7px/1.45 monospace; }
+.search-quote-cue { margin: -3px 12px 9px; color: var(--rust); font: 700 7px/1.35 monospace; text-transform: uppercase; }
+.search-open-primary { width: calc(100% - 20px); margin: 0 10px 10px; padding: 9px; border: 1px solid var(--ink); background: var(--acid); cursor: pointer; font: 800 8px/1 monospace; text-transform: uppercase; }
+.search-open-primary:hover, .search-open-primary:focus-visible { background: var(--ink); color: white; }
+.search-source-detail { border-top: 1px solid var(--line); }
+.search-source-detail > summary { padding: 9px 10px; cursor: pointer; font: 700 7px/1.35 monospace; text-transform: uppercase; }
 .range-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .narration-studio { margin: 14px; border: 1px solid var(--ink); background: #fffdf5; }
 .narration-studio > summary { display: grid; gap: 4px; padding: 11px; cursor: pointer; border-bottom: 1px solid var(--line); }
@@ -341,6 +387,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   .reader-grid { grid-template-columns: 1fr; }
   .section-rail { border-right: 0; border-bottom: 1px solid var(--ink); max-height: 220px; }
   .page-stage { padding-inline: 12px; }
+  .workspace-tabs { grid-template-columns: repeat(2, 1fr); }
+  .search-filters { grid-template-columns: 1fr; }
+  .search-query-row { grid-template-columns: 1fr; }
+  .search-query-row input { border-right: 1px solid var(--ink); border-bottom: 0; }
+  .search-query-row button { min-height: 38px; }
 }
 
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation: none !important; transition: none !important; } }

@@ -1,0 +1,22 @@
+[
+  { "query": "diagnosis", "expectedSection": "Chapter 1 Diagnosis", "expectedPage": 2 },
+  { "query": "diagnosing the central challenge", "expectedSection": "Chapter 1 Diagnosis", "expectedPage": 2 },
+  { "query": "central challenge", "expectedSection": "Chapter 1 Diagnosis", "expectedPage": 2 },
+  { "query": "underlying problem", "expectedSection": "Chapter 1 Diagnosis", "expectedPage": 3 },
+  { "query": "symptoms", "expectedSection": "Chapter 1 Diagnosis", "expectedPage": 3 },
+  { "query": "identifying the challenge", "expectedSection": "Chapter 1 Diagnosis", "expectedPage": 2 },
+  { "query": "strategy begins", "expectedSection": "Chapter 1 Diagnosis", "expectedPage": 2 },
+  { "query": "separates symptoms", "expectedSection": "Chapter 1 Diagnosis", "expectedPage": 3 },
+  { "query": "problem diagnosis", "expectedSection": "Chapter 1 Diagnosis", "expectedPage": 3 },
+  { "query": "what is the central problem", "expectedSection": "Chapter 1 Diagnosis", "expectedPage": 3 },
+  { "query": "guiding policy", "expectedSection": "Chapter 2 Guiding Policy", "expectedPage": 4 },
+  { "query": "approach to the challenge", "expectedSection": "Chapter 2 Guiding Policy", "expectedPage": 4 },
+  { "query": "establishes an approach", "expectedSection": "Chapter 2 Guiding Policy", "expectedPage": 4 },
+  { "query": "policy establishes", "expectedSection": "Chapter 2 Guiding Policy", "expectedPage": 4 },
+  { "query": "recommended approach", "expectedSection": "Chapter 2 Guiding Policy", "expectedPage": 4 },
+  { "query": "how to approach the challenge", "expectedSection": "Chapter 2 Guiding Policy", "expectedPage": 4 },
+  { "query": "Chapter 2 policy", "expectedSection": "Chapter 2 Guiding Policy", "expectedPage": 4 },
+  { "query": "guidance and policy", "expectedSection": "Chapter 2 Guiding Policy", "expectedPage": 4 },
+  { "query": "an approach", "expectedSection": "Chapter 2 Guiding Policy", "expectedPage": 4 },
+  { "query": "policy for the challenge", "expectedSection": "Chapter 2 Guiding Policy", "expectedPage": 4 }
+]
