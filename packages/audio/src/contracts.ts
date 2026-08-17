@@ -42,6 +42,8 @@ export interface NarrationScript {
   revision: number;
   sourceText: string;
   readingText: string;
+  /** Hash of the editable reading copy at the time this script was created. */
+  readingSourceHash?: string;
   evidence: EvidenceAnchor[];
   createdAt: string;
 }

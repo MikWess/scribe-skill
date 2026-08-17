@@ -8,16 +8,18 @@ export function createNarrationScript(
   readingText: string,
   evidence: NarrationScript["evidence"],
   revision = 1,
+  readingSourceHash?: string,
 ): NarrationScript {
   if (!sectionId || !sourceText.trim() || !readingText.trim() || evidence.length === 0) {
     throw new Error("Narration scripts require a section, source, reading text, and evidence");
   }
   return {
-    id: `script-${sha256(JSON.stringify({ sectionId, revision, sourceText, readingText, evidence })).slice("sha256:".length)}`,
+    id: `script-${sha256(JSON.stringify({ sectionId, revision, sourceText, readingText, evidence, readingSourceHash })).slice("sha256:".length)}`,
     sectionId,
     revision,
     sourceText,
     readingText,
+    readingSourceHash,
     evidence,
     createdAt: new Date().toISOString(),
   };

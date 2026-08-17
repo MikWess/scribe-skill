@@ -79,7 +79,43 @@ test("serves a token-protected, cited reader workflow over loopback", async (t) 
 
   const section = await fetch(`${service.url}/api/documents/${result.document.id}/sections`, {
     headers: { origin, "x-scribe-token": token },
-  }).then((response) => response.json()) as Array<{ id: string }>;
+  }).then((response) => response.json()) as Array<{ id: string; status: string }>;
+  assert.equal(section[0]?.status, "proposed");
+  const corpus = await fetch(`${service.url}/api/documents/${result.document.id}/corpus`, {
+    headers: { origin, "x-scribe-token": token },
+  }).then((response) => response.json()) as { summary: { passageCount: number; structureRevision: number } };
+  assert.equal(corpus.summary.passageCount, 1);
+  const passagePage = await fetch(`${service.url}/api/documents/${result.document.id}/passages?limit=1&offset=0`, {
+    headers: { origin, "x-scribe-token": token },
+  }).then((response) => response.json()) as { items: Array<{ evidence: unknown[] }>; nextOffset?: number };
+  assert.equal(passagePage.items[0]?.evidence.length, 1);
+  const identityInjection = await fetch(`${service.url}/api/sections/${section[0]!.id}`, {
+    method: "PATCH",
+    headers: { origin, "content-type": "application/json", "x-scribe-token": token },
+    body: JSON.stringify({ documentId: "another-book", expectedCorpusRevision: corpus.summary.structureRevision }),
+  });
+  assert.equal(identityInjection.status, 400);
+  const accepted = await fetch(`${service.url}/api/sections/${section[0]!.id}`, {
+    method: "PATCH",
+    headers: { origin, "content-type": "application/json", "x-scribe-token": token },
+    body: JSON.stringify({
+      status: "accepted",
+      title: "Evidence foundation",
+      expectedCorpusRevision: corpus.summary.structureRevision,
+    }),
+  }).then((response) => response.json()) as { status: string; origin: string; title: string };
+  assert.deepEqual(
+    { status: accepted.status, origin: accepted.origin, title: accepted.title },
+    { status: "accepted", origin: "user", title: "Evidence foundation" },
+  );
+  const staleMutation = await fetch(`${service.url}/api/sections/${section[0]!.id}`, {
+    method: "PATCH",
+    headers: { origin, "content-type": "application/json", "x-scribe-token": token },
+    body: JSON.stringify({ title: "Lost update", expectedCorpusRevision: corpus.summary.structureRevision }),
+  });
+  assert.equal(staleMutation.status, 409);
+  const conflict = await staleMutation.json() as { current: { structureRevision: number } };
+  assert.equal(conflict.current.structureRevision, corpus.summary.structureRevision + 1);
   const unavailable = await fetch(`${service.url}/api/audio/jobs`, {
     method: "POST",
     headers: { origin, "content-type": "application/json", "x-scribe-token": token },
@@ -87,6 +123,40 @@ test("serves a token-protected, cited reader workflow over loopback", async (t) 
   });
   assert.equal(unavailable.status, 409);
   assert.match((await unavailable.json() as { error: string }).error, /key is not configured/);
+});
+
+test("rejects corpus, section, and passage reads after source-asset tampering", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "scribe-skill-service-integrity-"));
+  const pdfPath = join(root, "integrity.pdf");
+  const pdf = await PDFDocument.create();
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  pdf.addPage([600, 800]).drawText("Cited corpus integrity.", { x: 50, y: 720, size: 12, font });
+  await writeFile(pdfPath, await pdf.save());
+  const token = "integrity-token";
+  const service = await startLocalService({ token, workspacePath: join(root, "library") });
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const headers = { "content-type": "application/json", "x-scribe-token": token };
+  const imported = await fetch(`${service.url}/api/import`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ path: pdfPath }),
+  }).then((response) => response.json()) as {
+    document: { id: string; assetPath: string };
+    sections: Array<{ id: string }>;
+  };
+  await writeFile(imported.document.assetPath, "tampered");
+
+  for (const path of ["corpus", "sections", "passages"]) {
+    const response = await fetch(`${service.url}/api/documents/${imported.document.id}/${path}`, { headers });
+    assert.equal(response.status, 400);
+    assert.match((await response.json() as { error: string }).error, /hash does not match/i);
+  }
+  const narration = await fetch(`${service.url}/api/sections/${imported.sections[0]!.id}/narration-script`, { headers });
+  assert.equal(narration.status, 400);
+  assert.match((await narration.json() as { error: string }).error, /hash does not match/i);
 });
 
 test("builds cited section scripts and caches a provider artifact without a real API key", async (t) => {
@@ -126,7 +196,10 @@ test("builds cited section scripts and caches a provider artifact without a real
   const headers = { "content-type": "application/json", "x-scribe-token": token };
   const imported = await fetch(`${service.url}/api/import`, {
     method: "POST", headers, body: JSON.stringify({ path: pdfPath }),
-  }).then((response) => response.json()) as { sections: Array<{ id: string }> };
+  }).then((response) => response.json()) as {
+    sections: Array<{ id: string }>;
+    summary: { structureRevision: number };
+  };
   const sectionId = imported.sections[0]!.id;
   const script = await fetch(`${service.url}/api/sections/${sectionId}/narration-script`, { headers })
     .then((response) => response.json()) as { readingText: string; sourceText: string; evidence: Array<{ blockId: string }> };
@@ -150,6 +223,20 @@ test("builds cited section scripts and caches a provider artifact without a real
     .then((response) => response.json()) as { voices: Array<{ provider: string; available: boolean }>; codex: { state: string } };
   assert.equal(capability.voices.find(({ provider }) => provider === "openai")?.available, true);
   assert.equal(capability.codex.state, "available");
+
+  const proposedGeneration = await fetch(`${service.url}/api/audio/jobs`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ sectionId, provider: "openai", voice: "coral", revision: 2 }),
+  });
+  assert.equal(proposedGeneration.status, 422);
+  assert.match((await proposedGeneration.json() as { error: string }).error, /accept this section boundary/i);
+  const accepted = await fetch(`${service.url}/api/sections/${sectionId}`, {
+    method: "PATCH",
+    headers,
+    body: JSON.stringify({ status: "accepted", expectedCorpusRevision: imported.summary.structureRevision }),
+  });
+  assert.equal(accepted.status, 200);
 
   const invalidRevision = await fetch(`${service.url}/api/audio/jobs`, {
     method: "POST",
@@ -219,7 +306,11 @@ test("plans and exports a rights- and budget-gated audiobook through the agent A
   const headers = { "content-type": "application/json", "x-scribe-token": token };
   const imported = await fetch(`${service.url}/api/import`, {
     method: "POST", headers, body: JSON.stringify({ path: pdfPath }),
-  }).then((response) => response.json()) as { document: { id: string }; sections: Array<{ id: string }> };
+  }).then((response) => response.json()) as {
+    document: { id: string; assetPath: string };
+    sections: Array<{ id: string }>;
+    summary: { structureRevision: number };
+  };
 
   const noIdempotency = await fetch(`${service.url}/api/audiobooks/plans`, {
     method: "POST", headers, body: JSON.stringify({ documentId: imported.document.id }),
@@ -237,6 +328,19 @@ test("plans and exports a rights- and budget-gated audiobook through the agent A
     maxProviderRequests: 10,
     rightsAffirmed: true,
   });
+  const proposedPlan = await fetch(`${service.url}/api/audiobooks/plans`, {
+    method: "POST",
+    headers: { ...headers, "idempotency-key": "proposed-boundary-plan" },
+    body: planBody,
+  });
+  assert.equal(proposedPlan.status, 422);
+  assert.match((await proposedPlan.json() as { error: string }).error, /accept every selected section/i);
+  const acceptedSection = await fetch(`${service.url}/api/sections/${imported.sections[0]!.id}`, {
+    method: "PATCH",
+    headers,
+    body: JSON.stringify({ status: "accepted", expectedCorpusRevision: imported.summary.structureRevision }),
+  });
+  assert.equal(acceptedSection.status, 200);
   const duplicateSections = await fetch(`${service.url}/api/audiobooks/plans`, {
     method: "POST",
     headers: { ...headers, "idempotency-key": "duplicate-sections" },
@@ -283,6 +387,12 @@ test("plans and exports a rights- and budget-gated audiobook through the agent A
     .then((response) => response.json()) as typeof run;
   assert.ok(run.export?.path.includes("production/exports"));
 
+  const customScript = await fetch(`${service.url}/api/sections/${imported.sections[0]!.id}/narration-script`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ readingText: "A deliberately edited reading copy for the approved section.", revision: 2 }),
+  });
+  assert.equal(customScript.status, 201);
   let staleRun = await fetch(`${service.url}/api/audiobooks/plans`, {
     method: "POST",
     headers: { ...headers, "idempotency-key": "api-source-drift-plan" },
@@ -306,14 +416,29 @@ test("plans and exports a rights- and budget-gated audiobook through the agent A
   const inspection = await fetch(`${service.url}/api/documents/${imported.document.id}/pages/1`, { headers })
     .then((response) => response.json()) as { blocks: Array<{ id: string }> };
   await fetch(`${service.url}/api/blocks/${inspection.blocks[0]!.id}`, {
-    method: "PATCH", headers, body: JSON.stringify({ status: "excluded", note: "Simulate approved source disappearing" }),
+    method: "PATCH",
+    headers,
+    body: JSON.stringify({
+      text: "The repaired reading copy changed after approval.",
+      note: "Simulate a post-approval reading-copy repair",
+      expectedCorpusRevision: imported.summary.structureRevision + 1,
+    }),
   });
-  await fetch(`${service.url}/api/audiobooks/${staleRun.id}/start`, { method: "POST", headers, body: "{}" });
-  for (let attempt = 0; attempt < 50 && staleRun.state !== "stale"; attempt += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    staleRun = await fetch(`${service.url}/api/audiobooks/${staleRun.id}`, { headers }).then((response) => response.json()) as typeof run;
-  }
-  assert.equal(staleRun.state, "stale");
+  const staleStart = await fetch(`${service.url}/api/audiobooks/${staleRun.id}/start`, { method: "POST", headers, body: "{}" });
+  assert.equal(staleStart.status, 409);
+  assert.equal(providerCalls, callsBeforeDrift);
+
+  let tamperRun = await fetch(`${service.url}/api/audiobooks/plans`, {
+    method: "POST",
+    headers: { ...headers, "idempotency-key": "api-asset-tamper-plan" },
+    body: planBody,
+  }).then((response) => response.json()) as typeof run;
+  tamperRun = await fetch(`${service.url}/api/audiobooks/${tamperRun.id}/confirm`, {
+    method: "POST", headers, body: JSON.stringify({ planHash: tamperRun.planHash }),
+  }).then((response) => response.json()) as typeof run;
+  await writeFile(imported.document.assetPath, "tampered after approval");
+  const tamperedStart = await fetch(`${service.url}/api/audiobooks/${tamperRun.id}/start`, { method: "POST", headers, body: "{}" });
+  assert.equal(tamperedStart.status, 409);
   assert.equal(providerCalls, callsBeforeDrift);
 });
 
@@ -349,7 +474,17 @@ test("agent API regenerates one structurally invalid part and resumes without re
   });
   const headers = { "content-type": "application/json", "x-scribe-token": token };
   const imported = await fetch(`${service.url}/api/import`, { method: "POST", headers, body: JSON.stringify({ path: pdfPath }) })
-    .then((response) => response.json()) as { document: { id: string }; sections: Array<{ id: string }> };
+    .then((response) => response.json()) as {
+      document: { id: string };
+      sections: Array<{ id: string }>;
+      summary: { structureRevision: number };
+    };
+  const accepted = await fetch(`${service.url}/api/sections/${imported.sections[0]!.id}`, {
+    method: "PATCH",
+    headers,
+    body: JSON.stringify({ status: "accepted", expectedCorpusRevision: imported.summary.structureRevision }),
+  });
+  assert.equal(accepted.status, 200);
   let run = await fetch(`${service.url}/api/audiobooks/plans`, {
     method: "POST",
     headers: { ...headers, "idempotency-key": "retry-plan" },

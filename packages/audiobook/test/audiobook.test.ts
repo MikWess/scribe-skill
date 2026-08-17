@@ -33,6 +33,7 @@ function planInput(readingText = "First sentence for a cited chapter. Second sen
     documentId: "doc-1",
     documentHash: `sha256:${"1".repeat(64)}`,
     extractionRevision: 1,
+    corpusRevision: 1,
     sections: [{
       sectionId: "section-1",
       title: "Opening",

@@ -137,6 +137,8 @@ Use a TypeScript monorepo: a desktop host, React reader UI, optional browser UI,
 
 ## 12. Delivery plan: proposed pull requests
 
+This table records the original delivery decomposition. For the forward plan after the current PR #6 → PR #7 merge train, use the [next 10 PR roadmap](next-10-prs.md); it supersedes the ordering below while preserving this PRD's product requirements.
+
 | PR | Scope | Acceptance evidence |
 | --- | --- | --- |
 | 0 | Foundation: monorepo, license, CI, ADRs, threat model, fixtures, execution policy, capability/run/evidence schemas | Fresh checkout installs, lints, tests, starts locally, and explains each unavailable execution capability. |
