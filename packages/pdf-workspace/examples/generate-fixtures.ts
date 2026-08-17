@@ -49,6 +49,22 @@ cleanPage.drawText("Every block still receives an exact durable evidence anchor.
 });
 await writeFile(resolve(outputPath, "digital-two-column.pdf"), await digital.save());
 
+const chaptered = await PDFDocument.create();
+const chapterFont = await chaptered.embedFont(StandardFonts.Helvetica);
+const contentsPage = chaptered.addPage([600, 800]);
+contentsPage.drawText("CONTENTS", { x: 50, y: 750, size: 24, font: chapterFont });
+contentsPage.drawText("Chapter 1 Diagnosis ........ 2", { x: 50, y: 700, size: 11, font: chapterFont });
+contentsPage.drawText("Chapter 2 Guiding Policy ........ 4", { x: 50, y: 670, size: 11, font: chapterFont });
+const diagnosisPage = chaptered.addPage([600, 800]);
+diagnosisPage.drawText("Chapter 1 Diagnosis", { x: 50, y: 750, size: 24, font: chapterFont });
+diagnosisPage.drawText("A strategy begins by identifying the central challenge.", { x: 50, y: 690, size: 11, font: chapterFont });
+const diagnosisContinuation = chaptered.addPage([600, 800]);
+diagnosisContinuation.drawText("Diagnosis separates symptoms from the underlying problem.", { x: 50, y: 720, size: 11, font: chapterFont });
+const policyPage = chaptered.addPage([600, 800]);
+policyPage.drawText("Chapter 2 Guiding Policy", { x: 50, y: 750, size: 24, font: chapterFont });
+policyPage.drawText("A guiding policy establishes an approach to the challenge.", { x: 50, y: 690, size: 11, font: chapterFont });
+await writeFile(resolve(outputPath, "semantic-chapters.pdf"), await chaptered.save());
+
 const scanned = await PDFDocument.create();
 const scannedPage = scanned.addPage([600, 800]);
 scannedPage.drawRectangle({ x: 40, y: 40, width: 520, height: 720, color: rgb(0.94, 0.94, 0.92) });

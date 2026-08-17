@@ -17,7 +17,7 @@ The exported skill is a navigation guide, not a static summary. Given a task, it
 
 ## Status
 
-Early implementation. The evidence/navigation foundation, deterministic local PDF workspace, accessible reader, and narrated-section slice are merged. The current slice adds no-key audiobook dry runs, immutable rights/budget receipts, resumable cited chapter production, structural audio QC, and portable checksummed packages. Read the [PRD](docs/PRD.md), [70+ source market research](docs/market-research.md), and [PR 4 six-profile blind-test report](docs/reviews/pr4-blind-test.md).
+Early implementation. The evidence/navigation foundation, deterministic local PDF workspace, accessible reader, and cited audiobook production are merged. The current stacked slice adds a versioned semantic corpus: detected chapter proposals, table-of-contents signals, stable cited passages, local review/edit controls, and explicit OCR blockers. Read the [PRD](docs/PRD.md), [next 10 PR roadmap](docs/next-10-prs.md), [semantic corpus decision](docs/adr/0006-semantic-corpus.md), and [70+ source market research](docs/market-research.md).
 
 ## Developer quick start
 
@@ -27,11 +27,13 @@ Requires Node.js 22+ and pnpm 11.
 pnpm install
 pnpm check
 pnpm fixtures:generate work/fixtures
-pnpm pdf:inspect work/fixtures/digital-two-column.pdf work/library
+pnpm pdf:inspect work/fixtures/semantic-chapters.pdf work/library
 pnpm --filter @scribe-skill/reader dev:stack
 ```
 
-The inspection command stores the source by hash, extracts blocks into SQLite, renders page 1 to PNG, reports page quality, and prints source text with evidence coordinates. Image-only PDFs are marked `ocr-required` rather than treated as searchable.
+The inspection command stores the source by hash, extracts blocks into SQLite, proposes semantic chapters, builds citation-ready passages, renders page 1 to PNG, reports page quality, and prints source text with evidence coordinates. Image-only PDFs are marked `ocr-required` and receive no fabricated passages. Corpus-changing API calls use optimistic revision checks, and paid audio generation accepts only reviewed section boundaries.
+
+Agent passage reads are bounded and lazy: `GET /api/documents/:id/passages?sectionId=:sectionId&limit=100&offset=0` returns `{ items, nextOffset }`. Opening or refreshing a book returns its summary and section map without eagerly serializing every passage and evidence anchor.
 
 The reader command starts the loopback-only local service and browser UI at `http://localhost:5173`. It uses an explicitly enabled development token; direct service use requires `SCRIBE_SKILL_TOKEN`. The Electron desktop host starts the same service itself on a random port with an ephemeral token, so `pnpm --filter @scribe-skill/reader desktop:dev` needs no separate server process. Build an unpacked desktop app for the current platform with `pnpm --filter @scribe-skill/reader desktop:build`.
 

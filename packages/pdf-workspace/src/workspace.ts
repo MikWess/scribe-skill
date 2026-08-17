@@ -8,6 +8,19 @@ import { sha256 } from "@scribe-skill/core";
 import { createCanvas } from "@napi-rs/canvas";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 
+import {
+  buildPassageDrafts,
+  detectTocEntries,
+  indexPassageBlocks,
+  proposeCorpusSections,
+  type CorpusSectionKind,
+  type CorpusSectionStatus,
+  type CorpusSummary,
+  type DocumentPassage,
+  type DocumentSection,
+  type ProposedSection,
+} from "./corpus.ts";
+
 export type PageQuality = "good" | "review-needed" | "ocr-required";
 export type BlockStatus = "included" | "excluded" | "rejected";
 
@@ -18,6 +31,7 @@ export interface ImportedDocument {
   assetPath: string;
   pageCount: number;
   extractionRevision: number;
+  corpusRevision: number;
 }
 
 export interface ExtractedPage {
@@ -39,6 +53,20 @@ export interface PageInspection {
 
 export class WorkspaceIntegrityError extends Error {
   override name = "WorkspaceIntegrityError";
+}
+
+export class CorpusRevisionConflictError extends Error {
+  override name = "CorpusRevisionConflictError";
+  readonly documentId: string;
+  readonly expectedRevision: number;
+  readonly currentRevision: number;
+
+  constructor(documentId: string, expectedRevision: number, currentRevision: number) {
+    super(`Corpus revision ${expectedRevision} is stale; current revision is ${currentRevision}`);
+    this.documentId = documentId;
+    this.expectedRevision = expectedRevision;
+    this.currentRevision = currentRevision;
+  }
 }
 
 export interface ExtractedBlock {
@@ -67,15 +95,6 @@ export interface BlockEdit {
   nextStatus: BlockStatus;
   note: string;
   createdAt: string;
-}
-
-export interface DocumentSection {
-  id: string;
-  documentId: string;
-  title: string;
-  startPage: number;
-  endPage: number;
-  order: number;
 }
 
 export interface ReadingProgress {
@@ -127,6 +146,26 @@ function pageQuality(blocks: RawBlock[]): { quality: PageQuality; confidence: nu
   return { quality: "good", confidence: 0.95 };
 }
 
+function deterministicReadingOrder(blocks: RawBlock[]): RawBlock[] {
+  const byPosition = (left: RawBlock, right: RawBlock) => left.y - right.y || left.x - right.x || left.order - right.order;
+  const left = blocks.filter(({ x }) => x < 0.46);
+  const right = blocks.filter(({ x }) => x > 0.5);
+  if (left.length < 2 || right.length < 2) return [...blocks].sort(byPosition);
+
+  const spanning = blocks.filter(({ width, x }) => width >= 0.62 || (x < 0.46 && x + width > 0.54));
+  const spanningIds = new Set(spanning.map(({ order }) => order));
+  const columnBlocks = blocks.filter(({ order }) => !spanningIds.has(order));
+  const firstColumnY = Math.min(...columnBlocks.map(({ y }) => y));
+  const headers = spanning.filter(({ y }) => y <= firstColumnY).sort(byPosition);
+  const footers = spanning.filter(({ y }) => y > firstColumnY).sort(byPosition);
+  return [
+    ...headers,
+    ...columnBlocks.filter(({ x }) => x < 0.5).sort(byPosition),
+    ...columnBlocks.filter(({ x }) => x >= 0.5).sort(byPosition),
+    ...footers,
+  ];
+}
+
 function normalizeBlock(row: Record<string, unknown>): ExtractedBlock {
   return {
     id: String(row.id),
@@ -146,6 +185,65 @@ function normalizeBlock(row: Record<string, unknown>): ExtractedBlock {
     },
     contentHash: String(row.content_hash),
     extractionRevision: Number(row.extraction_revision),
+  };
+}
+
+function normalizeSection(row: Record<string, unknown>): DocumentSection {
+  return {
+    id: String(row.id),
+    documentId: String(row.document_id),
+    parentId: row.parent_id ? String(row.parent_id) : undefined,
+    title: String(row.title),
+    kind: String(row.kind) as CorpusSectionKind,
+    level: Number(row.level),
+    startPage: Number(row.start_page),
+    endPage: Number(row.end_page),
+    startBlockId: row.start_block_id ? String(row.start_block_id) : undefined,
+    endBlockId: row.end_block_id ? String(row.end_block_id) : undefined,
+    order: Number(row.section_order),
+    confidence: Number(row.confidence),
+    origin: String(row.origin) as DocumentSection["origin"],
+    status: String(row.status) as CorpusSectionStatus,
+    structureRevision: Number(row.structure_revision),
+    rationale: String(row.rationale),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+function normalizePassage(row: Record<string, unknown>): DocumentPassage {
+  return {
+    id: String(row.id),
+    documentId: String(row.document_id),
+    sectionId: String(row.section_id),
+    sequence: Number(row.passage_sequence),
+    sourceText: String(row.source_text),
+    readingText: String(row.reading_text),
+    startPage: Number(row.start_page),
+    endPage: Number(row.end_page),
+    startBlockId: String(row.start_block_id),
+    endBlockId: String(row.end_block_id),
+    characterCount: Number(row.character_count),
+    contentHash: String(row.content_hash),
+    extractionRevision: Number(row.extraction_revision),
+    structureRevision: Number(row.structure_revision),
+    quality: String(row.quality) as DocumentPassage["quality"],
+    status: String(row.status) as DocumentPassage["status"],
+    evidence: JSON.parse(String(row.evidence_json)) as EvidenceAnchor[],
+  };
+}
+
+function normalizeEvidenceAnchor(row: Record<string, unknown>): EvidenceAnchor {
+  const block = normalizeBlock(row);
+  return {
+    id: `anchor-${block.id}`,
+    documentHash: String(row.document_hash),
+    page: block.pageNumber,
+    blockId: block.id,
+    characterRange: { start: 0, end: block.sourceText.length },
+    extractionRevision: block.extractionRevision,
+    contentHash: block.contentHash,
+    pageImageHash: row.render_hash ? String(row.render_hash) : undefined,
+    boundingBox: block.boundingBox,
   };
 }
 
@@ -174,6 +272,7 @@ export class PdfWorkspace {
     database.exec("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA application_id = 1397969747;");
     const workspace = new PdfWorkspace(absoluteRoot, database);
     workspace.migrate();
+    workspace.ensureCorpusMaterialized();
     return workspace;
   }
 
@@ -183,7 +282,7 @@ export class PdfWorkspace {
 
   private migrate(): void {
     const version = Number(this.database.prepare("PRAGMA user_version").get()?.user_version ?? 0);
-    if (version > 4) throw new Error(`Workspace schema ${version} is newer than this app supports`);
+    if (version > 5) throw new Error(`Workspace schema ${version} is newer than this app supports`);
     if (version === 0) {
       this.database.exec(`
         BEGIN;
@@ -194,6 +293,7 @@ export class PdfWorkspace {
           asset_path TEXT NOT NULL,
           page_count INTEGER NOT NULL,
           extraction_revision INTEGER NOT NULL,
+          corpus_revision INTEGER NOT NULL DEFAULT 1,
           imported_at TEXT NOT NULL
         );
         CREATE TABLE pages (
@@ -239,11 +339,44 @@ export class PdfWorkspace {
         CREATE TABLE sections (
           id TEXT PRIMARY KEY,
           document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+          parent_id TEXT REFERENCES sections(id) ON DELETE SET NULL,
           title TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK (kind IN ('chapter', 'section')),
+          level INTEGER NOT NULL,
           start_page INTEGER NOT NULL,
           end_page INTEGER NOT NULL,
-          section_order INTEGER NOT NULL
+          start_block_id TEXT,
+          end_block_id TEXT,
+          section_order INTEGER NOT NULL,
+          confidence REAL NOT NULL,
+          origin TEXT NOT NULL CHECK (origin IN ('detected', 'user')),
+          status TEXT NOT NULL CHECK (status IN ('proposed', 'accepted', 'excluded')),
+          structure_revision INTEGER NOT NULL,
+          rationale TEXT NOT NULL,
+          updated_at TEXT NOT NULL
         );
+        CREATE INDEX sections_document_order ON sections(document_id, section_order);
+        CREATE TABLE passages (
+          id TEXT PRIMARY KEY,
+          document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+          section_id TEXT NOT NULL REFERENCES sections(id) ON DELETE CASCADE,
+          passage_sequence INTEGER NOT NULL,
+          source_text TEXT NOT NULL,
+          reading_text TEXT NOT NULL,
+          start_page INTEGER NOT NULL,
+          end_page INTEGER NOT NULL,
+          start_block_id TEXT NOT NULL REFERENCES blocks(id),
+          end_block_id TEXT NOT NULL REFERENCES blocks(id),
+          character_count INTEGER NOT NULL,
+          content_hash TEXT NOT NULL,
+          extraction_revision INTEGER NOT NULL,
+          structure_revision INTEGER NOT NULL,
+          quality TEXT NOT NULL CHECK (quality IN ('good', 'review-needed', 'ocr-required')),
+          status TEXT NOT NULL CHECK (status IN ('current', 'stale')),
+          evidence_json TEXT NOT NULL,
+          UNIQUE(section_id, structure_revision, passage_sequence)
+        );
+        CREATE INDEX passages_document_section ON passages(document_id, section_id, passage_sequence);
         CREATE TABLE reading_progress (
           document_id TEXT PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
           page_number INTEGER NOT NULL,
@@ -259,7 +392,7 @@ export class PdfWorkspace {
           content TEXT NOT NULL,
           created_at TEXT NOT NULL
         );
-        PRAGMA user_version = 4;
+        PRAGMA user_version = 5;
         COMMIT;
       `);
     }
@@ -296,6 +429,258 @@ export class PdfWorkspace {
     if (version > 0 && version < 4) {
       this.database.exec("ALTER TABLE annotations ADD COLUMN authorship TEXT NOT NULL DEFAULT 'user' CHECK (authorship IN ('user', 'source', 'model')); PRAGMA user_version = 4;");
     }
+    if (version > 0 && version < 5) {
+      this.database.exec(`
+        BEGIN;
+        ALTER TABLE documents ADD COLUMN corpus_revision INTEGER NOT NULL DEFAULT 1;
+        ALTER TABLE sections RENAME TO sections_v4;
+        CREATE TABLE sections (
+          id TEXT PRIMARY KEY,
+          document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+          parent_id TEXT REFERENCES sections(id) ON DELETE SET NULL,
+          title TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK (kind IN ('chapter', 'section')),
+          level INTEGER NOT NULL,
+          start_page INTEGER NOT NULL,
+          end_page INTEGER NOT NULL,
+          start_block_id TEXT,
+          end_block_id TEXT,
+          section_order INTEGER NOT NULL,
+          confidence REAL NOT NULL,
+          origin TEXT NOT NULL CHECK (origin IN ('detected', 'user')),
+          status TEXT NOT NULL CHECK (status IN ('proposed', 'accepted', 'excluded')),
+          structure_revision INTEGER NOT NULL,
+          rationale TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        INSERT INTO sections
+          (id, document_id, parent_id, title, kind, level, start_page, end_page, start_block_id, end_block_id,
+           section_order, confidence, origin, status, structure_revision, rationale, updated_at)
+        SELECT id, document_id, NULL, title, 'section', 1, start_page, end_page, NULL, NULL,
+          section_order, 0.25, 'detected', 'proposed', 1, 'Migrated page guide from workspace schema 4.', ''
+        FROM sections_v4;
+        DROP TABLE sections_v4;
+        CREATE INDEX IF NOT EXISTS sections_document_order ON sections(document_id, section_order);
+        CREATE TABLE passages (
+          id TEXT PRIMARY KEY,
+          document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+          section_id TEXT NOT NULL REFERENCES sections(id) ON DELETE CASCADE,
+          passage_sequence INTEGER NOT NULL,
+          source_text TEXT NOT NULL,
+          reading_text TEXT NOT NULL,
+          start_page INTEGER NOT NULL,
+          end_page INTEGER NOT NULL,
+          start_block_id TEXT NOT NULL REFERENCES blocks(id),
+          end_block_id TEXT NOT NULL REFERENCES blocks(id),
+          character_count INTEGER NOT NULL,
+          content_hash TEXT NOT NULL,
+          extraction_revision INTEGER NOT NULL,
+          structure_revision INTEGER NOT NULL,
+          quality TEXT NOT NULL CHECK (quality IN ('good', 'review-needed', 'ocr-required')),
+          status TEXT NOT NULL CHECK (status IN ('current', 'stale')),
+          evidence_json TEXT NOT NULL,
+          UNIQUE(section_id, structure_revision, passage_sequence)
+        );
+        CREATE INDEX passages_document_section ON passages(document_id, section_id, passage_sequence);
+        PRAGMA user_version = 5;
+        COMMIT;
+      `);
+    }
+  }
+
+  private corpusBlocks(documentId: string) {
+    return this.listBlocks(documentId).map((block) => ({
+      id: block.id,
+      pageNumber: block.pageNumber,
+      sourceText: block.sourceText,
+      currentText: block.currentText,
+      currentOrder: block.currentOrder,
+      status: block.status,
+      confidence: block.confidence,
+      height: block.boundingBox.height,
+      extractionRevision: block.extractionRevision,
+    }));
+  }
+
+  private replaceDetectedSections(documentId: string, documentName: string, pageCount: number, revision: number): void {
+    const proposals = proposeCorpusSections(documentId, documentName, pageCount, this.corpusBlocks(documentId));
+    this.database.prepare("DELETE FROM sections WHERE document_id = ?").run(documentId);
+    const inserted: Array<{ proposal: ProposedSection; id: string }> = [];
+    const updatedAt = new Date().toISOString();
+    for (const [order, proposal] of proposals.entries()) {
+      const identity = sha256(JSON.stringify({
+        documentId,
+        startBlockId: proposal.startBlockId ?? `page:${proposal.startPage}`,
+        kind: proposal.kind,
+        title: proposal.title,
+      }));
+      const id = `${documentId}-${proposal.kind}-${identity.slice("sha256:".length, "sha256:".length + 16)}`;
+      const parent = proposal.kind === "section"
+        ? inserted.findLast(({ proposal: candidate }) => candidate.kind === "chapter")?.id
+        : undefined;
+      this.database
+        .prepare(
+          `INSERT INTO sections
+           (id, document_id, parent_id, title, kind, level, start_page, end_page, start_block_id,
+            end_block_id, section_order, confidence, origin, status, structure_revision, rationale, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'detected', 'proposed', ?, ?, ?)`,
+        )
+        .run(
+          id,
+          documentId,
+          parent ?? null,
+          proposal.title,
+          proposal.kind,
+          proposal.level,
+          proposal.startPage,
+          proposal.endPage,
+          proposal.startBlockId ?? null,
+          proposal.endBlockId ?? null,
+          order,
+          proposal.confidence,
+          revision,
+          proposal.rationale,
+          updatedAt,
+        );
+      inserted.push({ proposal, id });
+    }
+  }
+
+  private regeneratePassages(documentId: string, sectionIds?: string[]): void {
+    const selected = sectionIds ? new Set(sectionIds) : undefined;
+    const sections = this.listSections(documentId).filter((section) => !selected || selected.has(section.id));
+    for (const section of sections) {
+      this.database
+        .prepare("UPDATE passages SET status = 'stale' WHERE document_id = ? AND section_id = ? AND status = 'current'")
+        .run(documentId, section.id);
+    }
+    const pages = new Map(this.listPages(documentId).map((page) => [page.pageNumber, page]));
+    const blocks = this.corpusBlocks(documentId);
+    const passageBlockIndex = indexPassageBlocks(blocks);
+    const evidence = new Map(
+      this.database
+        .prepare(
+          `SELECT b.*, d.document_hash, p.render_hash
+           FROM blocks b
+           JOIN documents d ON d.id = b.document_id
+           JOIN pages p ON p.document_id = b.document_id AND p.page_number = b.page_number
+           WHERE b.document_id = ?`,
+        )
+        .all(documentId)
+        .map((row) => {
+          const anchor = normalizeEvidenceAnchor(row);
+          return [anchor.blockId, anchor] as const;
+        }),
+    );
+    for (const section of sections.filter(({ status }) => status !== "excluded")) {
+      const drafts = buildPassageDrafts(
+        documentId,
+        section,
+        blocks,
+        (pageNumber) => pages.get(pageNumber)?.quality ?? "review-needed",
+        (blockId) => {
+          const anchor = evidence.get(blockId);
+          if (!anchor) throw new Error(`Unknown block: ${blockId}`);
+          return anchor;
+        },
+        1_200,
+        passageBlockIndex,
+      );
+      for (const passage of drafts) {
+        this.database
+          .prepare(
+            `INSERT INTO passages
+             (id, document_id, section_id, passage_sequence, source_text, reading_text, start_page, end_page,
+              start_block_id, end_block_id, character_count, content_hash, extraction_revision,
+              structure_revision, quality, status, evidence_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'current', ?)
+             ON CONFLICT(id) DO UPDATE SET status = 'current', reading_text = excluded.reading_text,
+               structure_revision = excluded.structure_revision, quality = excluded.quality, evidence_json = excluded.evidence_json`,
+          )
+          .run(
+            passage.id,
+            documentId,
+            passage.sectionId,
+            passage.sequence,
+            passage.sourceText,
+            passage.readingText,
+            passage.startPage,
+            passage.endPage,
+            passage.startBlockId,
+            passage.endBlockId,
+            passage.characterCount,
+            passage.contentHash,
+            passage.extractionRevision,
+            passage.structureRevision,
+            passage.quality,
+            JSON.stringify(passage.evidence),
+          );
+      }
+    }
+  }
+
+  private isUntouchedLegacyPageGuide(documentId: string, sections: DocumentSection[], pageCount: number): boolean {
+    return sections.length === pageCount && sections.every((section, index) =>
+      section.title === `Page ${index + 1}` &&
+      section.startPage === index + 1 &&
+      section.endPage === index + 1 &&
+      section.rationale === "Migrated page guide from workspace schema 4.",
+    );
+  }
+
+  private ensureCorpusMaterialized(): void {
+    const rows = this.database.prepare("SELECT id, original_name, page_count, corpus_revision FROM documents").all();
+    for (const row of rows) {
+      const documentId = String(row.id);
+      const revision = Number(row.corpus_revision);
+      const sections = this.listSections(documentId);
+      const passageCount = Number(
+        this.database.prepare("SELECT COUNT(*) AS count FROM passages WHERE document_id = ? AND status = 'current'").get(documentId)?.count ?? 0,
+      );
+      if (!this.isUntouchedLegacyPageGuide(documentId, sections, Number(row.page_count)) && passageCount > 0) continue;
+      this.database.exec("BEGIN");
+      try {
+        if (this.isUntouchedLegacyPageGuide(documentId, sections, Number(row.page_count))) {
+          this.replaceDetectedSections(documentId, String(row.original_name), Number(row.page_count), revision);
+        }
+        this.regeneratePassages(documentId);
+        this.database.exec("COMMIT");
+      } catch (error) {
+        this.database.exec("ROLLBACK");
+        throw error;
+      }
+    }
+  }
+
+  private nextCorpusRevision(documentId: string): number {
+    const document = this.getDocument(documentId);
+    if (!document) throw new Error(`Unknown document: ${documentId}`);
+    const revision = document.corpusRevision + 1;
+    this.database.prepare("UPDATE documents SET corpus_revision = ? WHERE id = ?").run(revision, documentId);
+    return revision;
+  }
+
+  private requireCorpusRevision(documentId: string, expectedRevision: number): ImportedDocument {
+    const document = this.getDocument(documentId);
+    if (!document) throw new Error(`Unknown document: ${documentId}`);
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
+      throw new Error("A positive expectedCorpusRevision is required");
+    }
+    if (document.corpusRevision !== expectedRevision) {
+      throw new CorpusRevisionConflictError(documentId, expectedRevision, document.corpusRevision);
+    }
+    return document;
+  }
+
+  private refreshCorpusAfterBlockEdit(documentId: string, pageNumber: number): number {
+    const revision = this.nextCorpusRevision(documentId);
+    const affected = this.listSections(documentId).filter(({ startPage, endPage }) => pageNumber >= startPage && pageNumber <= endPage);
+    if (affected.length === 0) return revision;
+    this.database
+      .prepare(`UPDATE sections SET structure_revision = ?, updated_at = ? WHERE id IN (${affected.map(() => "?").join(",")})`)
+      .run(revision, new Date().toISOString(), ...affected.map(({ id }) => id));
+    this.regeneratePassages(documentId, affected.map(({ id }) => id));
+    return revision;
   }
 
   async importPdf(filePath: string): Promise<ImportedDocument> {
@@ -345,6 +730,7 @@ export class PdfWorkspace {
           ];
         });
         const quality = pageQuality(rawBlocks);
+        const orderedBlocks = deterministicReadingOrder(rawBlocks);
         this.database
           .prepare(
             `INSERT INTO pages
@@ -353,7 +739,7 @@ export class PdfWorkspace {
           )
           .run(id, pageNumber, viewport.width, viewport.height, quality.confidence, quality.quality);
 
-        for (const block of rawBlocks) {
+        for (const [currentOrder, block] of orderedBlocks.entries()) {
           const blockId = `${id}-p${pageNumber}-b${block.order}`;
           this.database
             .prepare(
@@ -369,7 +755,7 @@ export class PdfWorkspace {
               block.text,
               block.text,
               block.order,
-              block.order,
+              currentOrder,
               quality.confidence,
               block.x,
               block.y,
@@ -379,13 +765,9 @@ export class PdfWorkspace {
               revision,
             );
         }
-        this.database
-          .prepare(
-            `INSERT INTO sections (id, document_id, title, start_page, end_page, section_order)
-             VALUES (?, ?, ?, ?, ?, ?)`,
-          )
-          .run(`${id}-section-p${pageNumber}`, id, `Page ${pageNumber}`, pageNumber, pageNumber, pageNumber - 1);
       }
+      this.replaceDetectedSections(id, basename(filePath), pageCount, revision);
+      this.regeneratePassages(id);
       this.database.exec("COMMIT");
     } catch (error) {
       this.database.exec("ROLLBACK");
@@ -402,6 +784,7 @@ export class PdfWorkspace {
       assetPath,
       pageCount,
       extractionRevision: revision,
+      corpusRevision: revision,
     };
   }
 
@@ -423,6 +806,7 @@ export class PdfWorkspace {
       assetPath: String(row.asset_path),
       pageCount: Number(row.page_count),
       extractionRevision: Number(row.extraction_revision),
+      corpusRevision: Number(row.corpus_revision),
     };
   }
 
@@ -511,10 +895,21 @@ export class PdfWorkspace {
       .map(normalizeBlock);
   }
 
+  listIncludedBlocksForSection(sectionId: string): ExtractedBlock[] {
+    const section = this.getSection(sectionId);
+    if (!section) throw new Error(`Unknown section: ${sectionId}`);
+    const blocks = this.listIncludedBlocksInPageRange(section.documentId, section.startPage, section.endPage);
+    const startIndex = section.startBlockId ? blocks.findIndex(({ id }) => id === section.startBlockId) : 0;
+    const explicitEndIndex = section.endBlockId ? blocks.findIndex(({ id }) => id === section.endBlockId) : -1;
+    const endIndex = explicitEndIndex >= 0 ? explicitEndIndex : blocks.length - 1;
+    return startIndex >= 0 && endIndex >= startIndex ? blocks.slice(startIndex, endIndex + 1) : blocks;
+  }
+
   editBlock(
     blockId: string,
     patch: { text?: string; order?: number; status?: BlockStatus },
     note: string,
+    expectedCorpusRevision: number,
   ): ExtractedBlock {
     const currentRow = this.database.prepare("SELECT * FROM blocks WHERE id = ?").get(blockId);
     if (!currentRow) throw new Error(`Unknown block: ${blockId}`);
@@ -529,6 +924,7 @@ export class PdfWorkspace {
 
     this.database.exec("BEGIN");
     try {
+      this.requireCorpusRevision(current.documentId, expectedCorpusRevision);
       this.database
         .prepare(
           `INSERT INTO block_edits
@@ -549,6 +945,7 @@ export class PdfWorkspace {
       this.database
         .prepare("UPDATE blocks SET current_text = ?, current_order = ?, status = ? WHERE id = ?")
         .run(nextText, nextOrder, nextStatus, blockId);
+      this.refreshCorpusAfterBlockEdit(current.documentId, current.pageNumber);
       this.database.exec("COMMIT");
     } catch (error) {
       this.database.exec("ROLLBACK");
@@ -557,19 +954,21 @@ export class PdfWorkspace {
     return normalizeBlock(this.database.prepare("SELECT * FROM blocks WHERE id = ?").get(blockId)!);
   }
 
-  reorderBlock(blockId: string, direction: -1 | 1): ExtractedBlock[] {
+  reorderBlock(blockId: string, direction: -1 | 1, expectedCorpusRevision: number): ExtractedBlock[] {
     const currentRow = this.database.prepare("SELECT * FROM blocks WHERE id = ?").get(blockId);
     if (!currentRow) throw new Error(`Unknown block: ${blockId}`);
     const current = normalizeBlock(currentRow);
     const siblings = this.listBlocks(current.documentId, current.pageNumber);
     const index = siblings.findIndex(({ id }) => id === blockId);
     const targetIndex = index + direction;
+    this.requireCorpusRevision(current.documentId, expectedCorpusRevision);
     if (targetIndex < 0 || targetIndex >= siblings.length) return siblings;
     const target = siblings[targetIndex]!;
     const createdAt = new Date().toISOString();
 
     this.database.exec("BEGIN");
     try {
+      this.requireCorpusRevision(current.documentId, expectedCorpusRevision);
       for (const [block, nextOrder] of [
         [current, target.currentOrder],
         [target, current.currentOrder],
@@ -593,6 +992,7 @@ export class PdfWorkspace {
           );
         this.database.prepare("UPDATE blocks SET current_order = ? WHERE id = ?").run(nextOrder, block.id);
       }
+      this.refreshCorpusAfterBlockEdit(current.documentId, current.pageNumber);
       this.database.exec("COMMIT");
     } catch (error) {
       this.database.exec("ROLLBACK");
@@ -630,32 +1030,14 @@ export class PdfWorkspace {
       )
       .get(blockId);
     if (!row) throw new Error(`Unknown block: ${blockId}`);
-    const block = normalizeBlock(row);
-    return {
-      id: `anchor-${block.id}`,
-      documentHash: String(row.document_hash),
-      page: block.pageNumber,
-      blockId: block.id,
-      characterRange: { start: 0, end: block.sourceText.length },
-      extractionRevision: block.extractionRevision,
-      contentHash: block.contentHash,
-      pageImageHash: row.render_hash ? String(row.render_hash) : undefined,
-      boundingBox: block.boundingBox,
-    };
+    return normalizeEvidenceAnchor(row);
   }
 
   listSections(documentId: string): DocumentSection[] {
     return this.database
       .prepare("SELECT * FROM sections WHERE document_id = ? ORDER BY section_order")
       .all(documentId)
-      .map((row) => ({
-        id: String(row.id),
-        documentId: String(row.document_id),
-        title: String(row.title),
-        startPage: Number(row.start_page),
-        endPage: Number(row.end_page),
-        order: Number(row.section_order),
-      }));
+      .map(normalizeSection);
   }
 
   getSection(sectionId: string): DocumentSection | undefined {
@@ -665,14 +1047,29 @@ export class PdfWorkspace {
 
   updateSection(
     sectionId: string,
-    patch: Partial<Pick<DocumentSection, "title" | "startPage" | "endPage" | "order">>,
+    patch: Partial<Omit<Pick<DocumentSection, "title" | "kind" | "level" | "startPage" | "endPage" | "order" | "status" | "parentId">, "parentId">> & { parentId?: string | null },
+    expectedCorpusRevision: number,
   ): DocumentSection {
     const row = this.database.prepare("SELECT * FROM sections WHERE id = ?").get(sectionId);
     if (!row) throw new Error(`Unknown section: ${sectionId}`);
-    const current = this.listSections(String(row.document_id)).find(({ id }) => id === sectionId)!;
-    const next = { ...current, ...patch };
+    const current = normalizeSection(row);
+    const next: DocumentSection = {
+      ...current,
+      title: patch.title ?? current.title,
+      kind: patch.kind ?? current.kind,
+      level: patch.level ?? current.level,
+      startPage: patch.startPage ?? current.startPage,
+      endPage: patch.endPage ?? current.endPage,
+      order: patch.order ?? current.order,
+      status: patch.status ?? current.status,
+      parentId: patch.parentId === null ? undefined : patch.parentId ?? current.parentId,
+    };
     const document = this.getDocument(next.documentId)!;
     if (!next.title.trim()) throw new Error("Section title is required");
+    if (next.kind !== "chapter" && next.kind !== "section") throw new Error("Section kind must be chapter or section");
+    if (!Number.isSafeInteger(next.level) || next.level < 1 || next.level > 6) throw new Error("Section level must be from 1 to 6");
+    if (!(new Set<CorpusSectionStatus>(["proposed", "accepted", "excluded"])).has(next.status)) throw new Error("Invalid section status");
+    if (!Number.isSafeInteger(next.order) || next.order < 0) throw new Error("Section order must be a non-negative integer");
     if (
       !Number.isSafeInteger(next.startPage) ||
       !Number.isSafeInteger(next.endPage) ||
@@ -682,12 +1079,272 @@ export class PdfWorkspace {
     ) {
       throw new Error("Section page range is outside the document");
     }
-    this.database
-      .prepare(
-        "UPDATE sections SET title = ?, start_page = ?, end_page = ?, section_order = ? WHERE id = ?",
-      )
-      .run(next.title.trim(), next.startPage, next.endPage, next.order, sectionId);
-    return next;
+    if (next.parentId) {
+      const parent = this.getSection(next.parentId);
+      if (!parent || parent.documentId !== next.documentId || parent.id === next.id) throw new Error("Section parent is invalid");
+      const visited = new Set([next.id]);
+      let ancestor: DocumentSection | undefined = parent;
+      while (ancestor) {
+        if (visited.has(ancestor.id)) throw new Error("Section parent would create a hierarchy cycle");
+        visited.add(ancestor.id);
+        ancestor = ancestor.parentId ? this.getSection(ancestor.parentId) : undefined;
+      }
+    }
+    const startPageChanged = next.startPage !== current.startPage;
+    const endPageChanged = next.endPage !== current.endPage;
+    const pageRangeChanged = startPageChanged || endPageChanged;
+    const nextStartBlockId = startPageChanged
+      ? this.listIncludedBlocksInPageRange(next.documentId, next.startPage, next.startPage)[0]?.id
+      : current.startBlockId;
+    const nextEndBlockId = endPageChanged
+      ? this.listIncludedBlocksInPageRange(next.documentId, next.endPage, next.endPage).at(-1)?.id
+      : current.endBlockId;
+    this.database.exec("BEGIN");
+    try {
+      this.requireCorpusRevision(next.documentId, expectedCorpusRevision);
+      const revision = this.nextCorpusRevision(next.documentId);
+      const updatedAt = new Date().toISOString();
+      this.database
+        .prepare(
+          `UPDATE sections SET parent_id = ?, title = ?, kind = ?, level = ?, start_page = ?, end_page = ?,
+           start_block_id = ?, end_block_id = ?, section_order = ?, confidence = 1, origin = 'user', status = ?, structure_revision = ?,
+           rationale = 'Edited by the user.', updated_at = ? WHERE id = ?`,
+        )
+        .run(
+          next.parentId ?? null,
+          next.title.trim(),
+          next.kind,
+          next.level,
+          next.startPage,
+          next.endPage,
+          nextStartBlockId ?? null,
+          nextEndBlockId ?? null,
+          next.order,
+          next.status,
+          revision,
+          updatedAt,
+          sectionId,
+        );
+      const passageScopeChanged = pageRangeChanged || next.status !== current.status;
+      if (passageScopeChanged) this.regeneratePassages(next.documentId, [sectionId]);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+    return this.getSection(sectionId)!;
+  }
+
+  splitSection(sectionId: string, atPage: number, title: string | undefined, expectedCorpusRevision: number): DocumentSection[] {
+    const current = this.getSection(sectionId);
+    if (!current) throw new Error(`Unknown section: ${sectionId}`);
+    if (!Number.isSafeInteger(atPage) || atPage <= current.startPage || atPage > current.endPage) {
+      throw new Error("Split page must fall after the first page and inside the section");
+    }
+    const revision = this.getDocument(current.documentId)!.corpusRevision + 1;
+    const nextIdHash = sha256(JSON.stringify({ documentId: current.documentId, sectionId, atPage, revision }));
+    const nextId = `${current.documentId}-section-${nextIdHash.slice("sha256:".length, "sha256:".length + 16)}`;
+    const updatedAt = new Date().toISOString();
+    const splitBlocks = this.listIncludedBlocksInPageRange(current.documentId, atPage, current.endPage);
+    const firstSplitBlock = splitBlocks[0];
+    const priorBlocks = this.listIncludedBlocksInPageRange(current.documentId, current.startPage, atPage - 1);
+    const lastPriorBlock = priorBlocks.at(-1);
+    this.database.exec("BEGIN");
+    try {
+      this.requireCorpusRevision(current.documentId, expectedCorpusRevision);
+      this.nextCorpusRevision(current.documentId);
+      this.database
+        .prepare(
+          `UPDATE sections SET end_page = ?, end_block_id = ?, confidence = 1, origin = 'user',
+           status = 'accepted', structure_revision = ?, rationale = 'Split by the user.', updated_at = ? WHERE id = ?`,
+        )
+        .run(atPage - 1, lastPriorBlock?.id ?? null, revision, updatedAt, current.id);
+      this.database
+        .prepare("UPDATE sections SET section_order = section_order + 1, structure_revision = ? WHERE document_id = ? AND section_order > ?")
+        .run(revision, current.documentId, current.order);
+      this.database
+        .prepare(
+          `INSERT INTO sections
+           (id, document_id, parent_id, title, kind, level, start_page, end_page, start_block_id, end_block_id,
+            section_order, confidence, origin, status, structure_revision, rationale, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'user', 'accepted', ?, 'Split by the user.', ?)`,
+        )
+        .run(
+          nextId,
+          current.documentId,
+          current.parentId ?? null,
+          title?.trim() || `${current.title} — continued`,
+          current.kind,
+          current.level,
+          atPage,
+          current.endPage,
+          firstSplitBlock?.id ?? null,
+          current.endBlockId ?? splitBlocks.at(-1)?.id ?? null,
+          current.order + 1,
+          revision,
+          updatedAt,
+        );
+      this.regeneratePassages(current.documentId, [current.id, nextId]);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+    return this.listSections(current.documentId);
+  }
+
+  mergeSections(sectionId: string, targetSectionId: string, expectedCorpusRevision: number): DocumentSection[] {
+    const current = this.getSection(sectionId);
+    const target = this.getSection(targetSectionId);
+    if (!current || !target) throw new Error("Both sections are required for a merge");
+    if (current.documentId !== target.documentId || current.id === target.id) throw new Error("Sections must be distinct and in the same document");
+    const ordered = [current, target].sort((left, right) => left.startPage - right.startPage || left.order - right.order);
+    const [first, second] = ordered;
+    if (second!.startPage > first!.endPage + 1) throw new Error("Only adjacent or overlapping sections can be merged");
+    const revision = this.getDocument(current.documentId)!.corpusRevision + 1;
+    const updatedAt = new Date().toISOString();
+    this.database.exec("BEGIN");
+    try {
+      this.requireCorpusRevision(current.documentId, expectedCorpusRevision);
+      this.nextCorpusRevision(current.documentId);
+      const retainedParentId = first!.parentId === second!.id ? second!.parentId : first!.parentId;
+      this.database
+        .prepare(
+          `UPDATE sections SET parent_id = ?, title = ?, start_page = ?, end_page = ?, start_block_id = ?, end_block_id = ?,
+           confidence = 1, origin = 'user', status = 'accepted', structure_revision = ?,
+           rationale = 'Merged by the user.', updated_at = ? WHERE id = ?`,
+        )
+        .run(
+          retainedParentId ?? null,
+          first!.title,
+          first!.startPage,
+          Math.max(first!.endPage, second!.endPage),
+          first!.startBlockId ?? second!.startBlockId ?? null,
+          second!.endBlockId ?? first!.endBlockId ?? null,
+          revision,
+          updatedAt,
+          first!.id,
+        );
+      this.database
+        .prepare("UPDATE sections SET parent_id = ? WHERE parent_id = ? AND id <> ?")
+        .run(first!.id, second!.id, first!.id);
+      this.database.prepare("DELETE FROM sections WHERE id = ?").run(second!.id);
+      const remaining = this.listSections(current.documentId);
+      remaining.forEach((section, order) => {
+        this.database
+          .prepare("UPDATE sections SET section_order = ? WHERE id = ?")
+          .run(order, section.id);
+      });
+      this.regeneratePassages(current.documentId, [first!.id]);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+    return this.listSections(current.documentId);
+  }
+
+  reorderSection(sectionId: string, direction: -1 | 1, expectedCorpusRevision: number): DocumentSection[] {
+    const current = this.getSection(sectionId);
+    if (!current) throw new Error(`Unknown section: ${sectionId}`);
+    const sections = this.listSections(current.documentId);
+    const index = sections.findIndex(({ id }) => id === sectionId);
+    const target = sections[index + direction];
+    this.requireCorpusRevision(current.documentId, expectedCorpusRevision);
+    if (!target) return sections;
+    const revision = this.getDocument(current.documentId)!.corpusRevision + 1;
+    this.database.exec("BEGIN");
+    try {
+      this.requireCorpusRevision(current.documentId, expectedCorpusRevision);
+      this.nextCorpusRevision(current.documentId);
+      const updatedAt = new Date().toISOString();
+      this.database
+        .prepare("UPDATE sections SET section_order = ?, origin = 'user', structure_revision = ?, updated_at = ? WHERE id = ?")
+        .run(target.order, revision, updatedAt, current.id);
+      this.database
+        .prepare("UPDATE sections SET section_order = ?, origin = 'user', structure_revision = ?, updated_at = ? WHERE id = ?")
+        .run(current.order, revision, updatedAt, target.id);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+    return this.listSections(current.documentId);
+  }
+
+  listPassages(documentId: string, sectionId?: string, includeStale = false): DocumentPassage[] {
+    const statusClause = includeStale ? "" : "AND status = 'current'";
+    const rows = sectionId
+      ? this.database
+          .prepare(`SELECT * FROM passages WHERE document_id = ? AND section_id = ? ${statusClause} ORDER BY passage_sequence`)
+          .all(documentId, sectionId)
+      : this.database
+          .prepare(`SELECT * FROM passages WHERE document_id = ? ${statusClause} ORDER BY start_page, passage_sequence`)
+          .all(documentId);
+    return rows.map(normalizePassage);
+  }
+
+  listPassagesPage(
+    documentId: string,
+    options: { sectionId?: string; includeStale?: boolean; limit: number; offset: number },
+  ): { items: DocumentPassage[]; nextOffset?: number } {
+    const statusClause = options.includeStale ? "" : "AND status = 'current'";
+    const rows = options.sectionId
+      ? this.database
+          .prepare(`SELECT * FROM passages WHERE document_id = ? AND section_id = ? ${statusClause} ORDER BY passage_sequence LIMIT ? OFFSET ?`)
+          .all(documentId, options.sectionId, options.limit + 1, options.offset)
+      : this.database
+          .prepare(`SELECT * FROM passages WHERE document_id = ? ${statusClause} ORDER BY start_page, passage_sequence LIMIT ? OFFSET ?`)
+          .all(documentId, options.limit + 1, options.offset);
+    const hasMore = rows.length > options.limit;
+    return {
+      items: rows.slice(0, options.limit).map(normalizePassage),
+      nextOffset: hasMore ? options.offset + options.limit : undefined,
+    };
+  }
+
+  corpusSummary(documentId: string): CorpusSummary {
+    const document = this.getDocument(documentId);
+    if (!document) throw new Error(`Unknown document: ${documentId}`);
+    const sections = this.listSections(documentId);
+    const passageCount = Number(
+      this.database.prepare("SELECT COUNT(*) AS count FROM passages WHERE document_id = ? AND status = 'current'").get(documentId)?.count ?? 0,
+    );
+    const pages = this.listPages(documentId);
+    const reviewRequiredPages = pages.filter(({ quality }) => quality === "review-needed").map(({ pageNumber }) => pageNumber);
+    const ocrRequiredPages = pages.filter(({ quality }) => quality === "ocr-required").map(({ pageNumber }) => pageNumber);
+    const blockers: string[] = [];
+    if (ocrRequiredPages.length) blockers.push(`OCR required on ${ocrRequiredPages.length} page${ocrRequiredPages.length === 1 ? "" : "s"}.`);
+    if (passageCount === 0) blockers.push("No citation-ready passages are available.");
+    return {
+      documentId,
+      structureRevision: document.corpusRevision,
+      sectionCount: sections.length,
+      passageCount,
+      tocEntryCount: detectTocEntries(this.corpusBlocks(documentId)).length,
+      proposedSectionCount: sections.filter(({ status }) => status === "proposed").length,
+      acceptedSectionCount: sections.filter(({ status }) => status === "accepted").length,
+      excludedSectionCount: sections.filter(({ status }) => status === "excluded").length,
+      reviewRequiredPages,
+      ocrRequiredPages,
+      ready: blockers.length === 0,
+      blockers,
+    };
+  }
+
+  getCorpus(documentId: string): { summary: CorpusSummary; sections: DocumentSection[]; passages: DocumentPassage[] } {
+    return {
+      summary: this.corpusSummary(documentId),
+      sections: this.listSections(documentId),
+      passages: this.listPassages(documentId),
+    };
+  }
+
+  getCorpusOverview(documentId: string): { summary: CorpusSummary; sections: DocumentSection[] } {
+    return {
+      summary: this.corpusSummary(documentId),
+      sections: this.listSections(documentId),
+    };
   }
 
   saveProgress(documentId: string, pageNumber: number, blockId?: string): ReadingProgress {

@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 interface Section {
   id: string;
   title: string;
+  status: "proposed" | "accepted" | "excluded";
 }
 
 interface VoiceCapability {
@@ -89,6 +90,7 @@ export function NarrationPanel({ section, documentName, requestJson, fetchArtifa
   const revision = (script?.revision ?? 1) + (script && readingText !== script.readingText ? 1 : 0);
   const draftChanged = Boolean(script && readingText !== script.readingText);
   const savedInKeychain = provider === "device" ? false : Boolean(keyStatus?.[provider]);
+  const providerGenerationAllowed = section.status === "accepted";
 
   async function refreshCapabilities() {
     const next = await requestJson<CapabilityResponse>("/api/capabilities");
@@ -305,7 +307,7 @@ export function NarrationPanel({ section, documentName, requestJson, fetchArtifa
     <details className="narration-studio" open>
       <summary><span>SECTION VOICE</span><strong>{section.title}</strong><small>Choose free preview or generated audio</small></summary>
       <div className="narration-body">
-        <p className="component-purpose"><strong>What this does</strong> Keeps narration tied to the current section and its evidence anchors. Editing the reading script never changes the original source.</p>
+        <p className="component-purpose"><strong>What this does</strong> Keeps narration tied to the current section and its evidence anchors. Device preview is provisional; paid provider generation unlocks only after you accept the section boundary.</p>
         <div className="provider-tabs" role="group" aria-label="Voice provider">
           {(["device", "openai", "elevenlabs"] as const).map((candidate) => {
             const capability = capabilities?.voices.find(({ provider: id }) => id === candidate);
@@ -320,7 +322,11 @@ export function NarrationPanel({ section, documentName, requestJson, fetchArtifa
 
         <div className="capability-strip" data-available={currentCapability?.available}>
           <span>{timingLabel(currentCapability?.timingQuality ?? "none")}</span>
-          <span>{provider === "device" ? "No API key · preview only" : currentCapability?.available ? `BYOK configured${currentCapability.maxCharacters ? ` · ≤ ${currentCapability.maxCharacters.toLocaleString()} chars` : ""}` : currentCapability?.reason}</span>
+          <span>{provider === "device"
+            ? `${section.status === "accepted" ? "Accepted section" : "Unreviewed proposal"} · no API key · preview only`
+            : !providerGenerationAllowed
+              ? "Accept this section boundary before paid generation"
+              : currentCapability?.available ? `BYOK configured${currentCapability.maxCharacters ? ` · ≤ ${currentCapability.maxCharacters.toLocaleString()} chars` : ""}` : currentCapability?.reason}</span>
         </div>
 
         <label className="script-field">What the voice will read
@@ -359,7 +365,7 @@ export function NarrationPanel({ section, documentName, requestJson, fetchArtifa
               </details>
             )}
             <div className="narration-actions">
-              <button className="primary" onClick={() => void generateAudio()} disabled={!currentCapability?.available || !voice.trim() || job?.status === "running" || job?.status === "queued"}>Generate & cache section</button>
+              <button className="primary" onClick={() => void generateAudio()} disabled={!providerGenerationAllowed || !currentCapability?.available || !voice.trim() || job?.status === "running" || job?.status === "queued"}>Generate & cache section</button>
               {(job?.status === "queued" || job?.status === "running") && <button onClick={() => void cancelAudio()}>Cancel</button>}
             </div>
           </>

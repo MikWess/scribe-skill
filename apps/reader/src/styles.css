@@ -119,12 +119,18 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .section-rail { background: #c8ccbf; border-right: 1px solid var(--ink); padding: 0 14px 22px; overflow: auto; }
 .rail-intro { position: sticky; top: 0; z-index: 2; margin: 0 -14px; padding: 20px 20px 16px; border-bottom: 1px solid var(--ink); background: #c8ccbf; }
 .rail-intro p { margin: 8px 0 0; color: rgba(20,37,31,.62); font-size: 10px; line-height: 1.45; }
+.corpus-meter { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: 12px; padding-top: 10px; border-top: 1px solid rgba(20,37,31,.25); font: 7px/1.3 monospace; text-transform: uppercase; }
+.corpus-meter strong { grid-column: 1 / -1; font-size: 9px; }
+.corpus-meter[data-ready="true"] strong::before { content: "● "; color: #2c8a46; }
+.corpus-meter[data-ready="false"] strong::before { content: "● "; color: var(--rust); }
 .section { width: 100%; display: grid; grid-template-columns: 28px 1fr; gap: 4px 8px; text-align: left; background: transparent; border: 0; border-bottom: 1px solid var(--line); padding: 18px 8px; cursor: pointer; }
-.section > span { font: 11px monospace; opacity: .55; grid-row: 1 / 3; }
+.section > span { font: 11px monospace; opacity: .55; grid-row: 1 / 4; }
 .section strong { font: 600 15px/1.2 "Iowan Old Style", serif; }
-.section small { opacity: .6; }
+.section small { opacity: .6; font: 7px/1.3 monospace; text-transform: uppercase; }
 .section:hover { background: rgba(245,240,228,.52); }
 .section.active { background: var(--acid); box-shadow: inset 4px 0 var(--ink); }
+.section.excluded { opacity: .45; }
+.section.proposed strong::after { content: " · REVIEW"; color: var(--rust); font: 7px monospace; }
 .rail-footer { display: flex; justify-content: space-between; margin-top: 28px; padding: 8px; font: 10px monospace; opacity: .65; }
 
 .page-stage { background: #777c73; overflow: auto; padding: 18px 30px 60px; }
@@ -161,7 +167,36 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .section-editor[open] > summary { border-bottom: 1px solid var(--line); }
 .section-editor-body { display: grid; gap: 10px; padding: 12px; }
 .section-editor label, .note-field { display: grid; gap: 4px; font: 10px monospace; text-transform: uppercase; }
-.section-editor input { width: 100%; background: transparent; border: 0; border-bottom: 1px solid var(--line); padding: 7px 3px; }
+.section-editor input, .section-editor select { width: 100%; background: transparent; border: 0; border-bottom: 1px solid var(--line); padding: 7px 3px; }
+.section-proposal-meta { padding: 9px; border-left: 3px solid var(--blue); background: rgba(65,89,213,.07); font: 8px/1.4 monospace; }
+.section-proposal-meta strong, .section-proposal-meta span { display: block; }
+.section-proposal-meta p { margin: 6px 0 0; color: var(--muted); }
+.section-review-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
+.section-review-actions button, .section-split-row button { min-height: 32px; border: 1px solid var(--ink); background: transparent; cursor: pointer; font: 700 7px/1.2 monospace; text-transform: uppercase; }
+.section-review-actions button[aria-pressed="true"], .section-review-actions .accept { background: var(--ink); color: white; }
+.section-review-actions .exclude { color: var(--rust); border-color: var(--rust); }
+.section-review-actions button:disabled, .section-split-row button:disabled { opacity: .35; cursor: default; }
+.section-split-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; align-items: end; }
+.passage-preview { border-top: 1px solid var(--line); padding-top: 8px; }
+.passage-preview > summary { cursor: pointer; font: 700 8px/1.3 monospace; text-transform: uppercase; }
+.passage-preview > p { margin: 7px 0; }
+.segmentation-note { padding: 8px; border-left: 3px solid var(--blue); background: rgba(65,89,213,.07); color: var(--muted); font: 8px/1.45 monospace; }
+.passage-trace { margin-top: 8px; border: 1px solid var(--line); background: #fffdf7; }
+.passage-trace > summary { display: grid; gap: 3px; padding: 8px; cursor: pointer; font: 7px/1.35 monospace; text-transform: uppercase; }
+.passage-trace > summary small { color: var(--muted); }
+.passage-copy-compare { display: grid; grid-template-columns: 1fr 1fr; border-top: 1px solid var(--line); }
+.passage-copy-compare > div { min-width: 0; padding: 9px; }
+.passage-copy-compare > div + div { border-left: 1px solid var(--line); }
+.passage-copy-compare strong { font: 700 7px/1.3 monospace; text-transform: uppercase; }
+.passage-copy-compare p { margin: 5px 0 0; max-height: 150px; overflow: auto; white-space: pre-wrap; font: 12px/1.45 "Iowan Old Style", serif; }
+.passage-integrity { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 7px; padding: 8px 9px; border-top: 1px solid var(--line); font: 7px/1.35 monospace; text-transform: uppercase; }
+.passage-integrity code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-transform: none; }
+.passage-integrity span:last-child { grid-column: 1 / -1; color: var(--muted); }
+.anchor-list { display: grid; gap: 5px; padding: 8px; border-top: 1px solid var(--line); }
+.anchor-list button { display: grid; gap: 2px; min-width: 0; padding: 7px; border: 1px solid var(--line); background: transparent; cursor: pointer; text-align: left; }
+.anchor-list button:hover, .anchor-list button:focus-visible { border-color: var(--blue); background: rgba(65,89,213,.07); }
+.anchor-list strong, .anchor-list span, .anchor-list small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 7px/1.35 monospace; }
+.anchor-list small { color: var(--blue); }
 .range-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .narration-studio { margin: 14px; border: 1px solid var(--ink); background: #fffdf5; }
 .narration-studio > summary { display: grid; gap: 4px; padding: 11px; cursor: pointer; border-bottom: 1px solid var(--line); }
@@ -266,6 +301,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .save-note { width: 100%; margin-top: 7px; background: var(--acid); }
 .save-note:disabled { opacity: .35; }
 .empty-inspector { padding: 40px 24px; color: rgba(23,33,29,.55); font-family: "Iowan Old Style", serif; }
+.empty-inspector strong { display: block; color: var(--ink); font-size: 20px; }
+.empty-inspector p { max-width: 42ch; line-height: 1.5; }
+.accept-boundary { min-height: 40px; padding: 9px 12px; border: 1px solid var(--ink); background: var(--acid); cursor: pointer; font: 700 9px/1.2 monospace; text-transform: uppercase; }
+.accept-boundary:hover, .accept-boundary:focus-visible { background: var(--ink); color: var(--paper); }
 
 @media (max-width: 1180px) {
   .reader-grid { grid-template-columns: 180px minmax(400px, 1fr) 390px; }

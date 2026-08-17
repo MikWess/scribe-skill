@@ -68,6 +68,7 @@ export interface CreateAudiobookPlanInput {
   documentId: string;
   documentHash: string;
   extractionRevision: number;
+  corpusRevision: number;
   sections: AudiobookSectionInput[];
   provider: Exclude<VoiceCapability["provider"], "device">;
   providerHost: string;
@@ -166,6 +167,7 @@ export interface AudiobookRun {
   documentId: string;
   documentHash: string;
   extractionRevision: number;
+  corpusRevision: number;
   provider: CreateAudiobookPlanInput["provider"];
   providerHost: string;
   voice: string;

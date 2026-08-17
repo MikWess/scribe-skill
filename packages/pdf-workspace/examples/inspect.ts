@@ -14,6 +14,7 @@ try {
   const document = await workspace.importPdf(resolve(pdfPath));
   const pages = workspace.listPages(document.id);
   const blocks = workspace.listBlocks(document.id);
+  const corpus = workspace.getCorpus(document.id);
   const inspection = await workspace.inspectPage(document.id, 1);
   process.stdout.write(
     `${JSON.stringify(
@@ -21,6 +22,18 @@ try {
         document,
         quality: pages.map(({ pageNumber, quality, confidence }) => ({ pageNumber, quality, confidence })),
         blockCount: blocks.length,
+        corpus: {
+          summary: corpus.summary,
+          sections: corpus.sections,
+          passages: corpus.passages.map((passage) => ({
+            id: passage.id,
+            sectionId: passage.sectionId,
+            pages: [passage.startPage, passage.endPage],
+            characterCount: passage.characterCount,
+            quality: passage.quality,
+            evidenceCount: passage.evidence.length,
+          })),
+        },
         inspectedPage: {
           renderPath: inspection.renderPath,
           renderHash: inspection.renderHash,

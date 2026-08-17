@@ -15,7 +15,8 @@ import { AudiobookWorkspace } from "@scribe-skill/audiobook";
 import type { CreateAudiobookPlanInput, ProductionChunk } from "@scribe-skill/audiobook";
 import { getCodexCapability, sha256 } from "@scribe-skill/core";
 import type { Capability, EvidenceAnchor } from "@scribe-skill/core";
-import { PdfWorkspace } from "@scribe-skill/pdf-workspace";
+import { CorpusRevisionConflictError, PdfWorkspace } from "@scribe-skill/pdf-workspace";
+import type { DocumentSection } from "@scribe-skill/pdf-workspace";
 
 const insecureDevelopmentToken = "local-development-only";
 
@@ -79,6 +80,12 @@ function canonicalJson(value: unknown): string {
       .join(",")}}`;
   }
   return JSON.stringify(value) ?? "null";
+}
+
+function expectedCorpusRevision(input: Record<string, unknown>): number {
+  const revision = Number(input.expectedCorpusRevision);
+  if (!Number.isSafeInteger(revision) || revision < 1) throw new Error("A positive expectedCorpusRevision is required");
+  return revision;
 }
 
 export async function startLocalService(options: LocalServiceOptions): Promise<LocalServiceHandle> {
@@ -150,16 +157,22 @@ async function drainAudioQueue(): Promise<void> {
 function scriptForSection(sectionId: string, readingText?: string, revision = 1) {
   const section = workspace.getSection(sectionId);
   if (!section) throw new Error(`Unknown section: ${sectionId}`);
-  const blocks = workspace.listIncludedBlocksInPageRange(section.documentId, section.startPage, section.endPage);
+  const blocks = workspace.listIncludedBlocksForSection(section.id);
   if (blocks.length === 0) throw new Error("This section has no included extracted text to narrate");
   const sourceText = blocks.map(({ sourceText }) => sourceText).join("\n\n");
   const defaultReadingText = blocks.map(({ currentText }) => currentText).join("\n\n");
+  const readingSourceHash = sha256(defaultReadingText);
   const evidence = blocks.map(({ id }) => workspace.evidenceForBlock(id));
   if (readingText === undefined) {
     const latest = audio.latestScript(section.id);
-    if (latest && latest.sourceText === sourceText && JSON.stringify(latest.evidence) === JSON.stringify(evidence)) return latest;
+    if (
+      latest &&
+      latest.sourceText === sourceText &&
+      latest.readingSourceHash === readingSourceHash &&
+      JSON.stringify(latest.evidence) === JSON.stringify(evidence)
+    ) return latest;
   }
-  return createNarrationScript(section.id, sourceText, readingText ?? defaultReadingText, evidence, revision);
+  return createNarrationScript(section.id, sourceText, readingText ?? defaultReadingText, evidence, revision, readingSourceHash);
 }
 
 function sourceQuality(documentId: string, startPage: number, endPage: number): "good" | "review-needed" | "ocr-required" {
@@ -171,8 +184,18 @@ function sourceQuality(documentId: string, startPage: number, endPage: number): 
   return "good";
 }
 
-function currentChunkSource(chunk: ProductionChunk): boolean {
+async function currentChunkSource(run: ReturnType<typeof audiobooks.get> & {}, chunk: ProductionChunk): Promise<boolean> {
   try {
+    const document = workspace.getDocument(run.documentId);
+    if (!document || document.documentHash !== run.documentHash || document.extractionRevision !== run.extractionRevision) return false;
+    await workspace.verifyDocumentAsset(document.id);
+    if (document.corpusRevision !== run.corpusRevision) return false;
+    const review = run.sourceReview.find(({ sectionId }) => sectionId === chunk.sectionId);
+    const section = workspace.getSection(chunk.sectionId);
+    if (
+      !review || !section || section.documentId !== run.documentId || section.status !== "accepted" ||
+      section.title !== review.title || section.startPage !== review.pages[0] || section.endPage !== review.pages[1]
+    ) return false;
     return scriptForSection(chunk.sectionId).id === chunk.sourceScriptId;
   } catch {
     return false;
@@ -201,7 +224,7 @@ const server = createServer(async (request, response) => {
       const input = await body(request);
       if (typeof input.path !== "string") return send(response, 400, { error: "PDF path is required" });
       const document = await workspace.importPdf(input.path);
-      return send(response, 201, { document, sections: workspace.listSections(document.id) });
+      return send(response, 201, { document, ...workspace.getCorpusOverview(document.id) });
     }
     if (request.method === "POST" && url.pathname === "/api/import-file") {
       const requestedName = basename(url.searchParams.get("name") ?? "import.pdf");
@@ -211,7 +234,7 @@ const server = createServer(async (request, response) => {
       try {
         await writeFile(temporaryPath, await rawBody(request));
         const document = await workspace.importPdf(temporaryPath);
-        return send(response, 201, { document, sections: workspace.listSections(document.id) });
+        return send(response, 201, { document, ...workspace.getCorpusOverview(document.id) });
       } finally {
         await rm(temporaryDirectory, { recursive: true, force: true });
       }
@@ -222,7 +245,7 @@ const server = createServer(async (request, response) => {
       const document = workspace.getDocument(documentMatch[1]!);
       if (!document) return send(response, 404, { error: "Document is not in this workspace" });
       await workspace.verifyDocumentAsset(document.id);
-      return send(response, 200, { document, sections: workspace.listSections(document.id) });
+      return send(response, 200, { document, ...workspace.getCorpusOverview(document.id) });
     }
 
     const pageMatch = url.pathname.match(/^\/api\/documents\/([^/]+)\/pages\/(\d+)$/);
@@ -243,24 +266,107 @@ const server = createServer(async (request, response) => {
 
     const sectionsMatch = url.pathname.match(/^\/api\/documents\/([^/]+)\/sections$/);
     if (request.method === "GET" && sectionsMatch) {
+      await workspace.verifyDocumentAsset(sectionsMatch[1]!);
       return send(response, 200, workspace.listSections(sectionsMatch[1]!));
     }
+    const corpusMatch = url.pathname.match(/^\/api\/documents\/([^/]+)\/corpus$/);
+    if (request.method === "GET" && corpusMatch) {
+      await workspace.verifyDocumentAsset(corpusMatch[1]!);
+      return send(response, 200, workspace.getCorpusOverview(corpusMatch[1]!));
+    }
+    const passagesMatch = url.pathname.match(/^\/api\/documents\/([^/]+)\/passages$/);
+    if (request.method === "GET" && passagesMatch) {
+      await workspace.verifyDocumentAsset(passagesMatch[1]!);
+      const limit = Number(url.searchParams.get("limit") ?? 100);
+      const offset = Number(url.searchParams.get("offset") ?? 0);
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200 || !Number.isSafeInteger(offset) || offset < 0) {
+        return send(response, 400, { error: "Passage limit must be 1–200 and offset must be a non-negative integer" });
+      }
+      return send(
+        response,
+        200,
+        workspace.listPassagesPage(passagesMatch[1]!, {
+          sectionId: url.searchParams.get("sectionId") ?? undefined,
+          includeStale: url.searchParams.get("includeStale") === "true",
+          limit,
+          offset,
+        }),
+      );
+    }
     const sectionMatch = url.pathname.match(/^\/api\/sections\/([^/]+)$/);
+    const sectionSplitMatch = url.pathname.match(/^\/api\/sections\/([^/]+)\/split$/);
+    const sectionMergeMatch = url.pathname.match(/^\/api\/sections\/([^/]+)\/merge$/);
+    const sectionReorderMatch = url.pathname.match(/^\/api\/sections\/([^/]+)\/reorder$/);
     const narrationScriptMatch = url.pathname.match(/^\/api\/sections\/([^/]+)\/narration-script$/);
     if (request.method === "GET" && narrationScriptMatch) {
-      return send(response, 200, scriptForSection(narrationScriptMatch[1]!));
+      const section = workspace.getSection(narrationScriptMatch[1]!);
+      if (!section) return send(response, 404, { error: "Section not found" });
+      await workspace.verifyDocumentAsset(section.documentId);
+      return send(response, 200, scriptForSection(section.id));
     }
     if (request.method === "POST" && narrationScriptMatch) {
       const input = await body(request);
+      const section = workspace.getSection(narrationScriptMatch[1]!);
+      if (!section) return send(response, 404, { error: "Section not found" });
+      await workspace.verifyDocumentAsset(section.documentId);
       if (typeof input.readingText !== "string" || !input.readingText.trim()) {
         return send(response, 400, { error: "Narration reading text is required" });
       }
       const revision = Number(input.revision);
       if (!Number.isSafeInteger(revision) || revision < 1) return send(response, 400, { error: "A positive script revision is required" });
-      return send(response, 201, audio.saveScript(scriptForSection(narrationScriptMatch[1]!, input.readingText, revision)));
+      return send(response, 201, audio.saveScript(scriptForSection(section.id, input.readingText, revision)));
     }
     if (request.method === "PATCH" && sectionMatch) {
-      return send(response, 200, workspace.updateSection(sectionMatch[1]!, await body(request)));
+      const input = await body(request);
+      const section = workspace.getSection(sectionMatch[1]!);
+      if (!section) return send(response, 404, { error: "Section not found" });
+      await workspace.verifyDocumentAsset(section.documentId);
+      const allowedPatchFields = new Set(["expectedCorpusRevision", "title", "kind", "level", "startPage", "endPage", "order", "status", "parentId"]);
+      const unknownPatchFields = Object.keys(input).filter((key) => !allowedPatchFields.has(key));
+      if (unknownPatchFields.length) return send(response, 400, { error: `Unknown section field: ${unknownPatchFields.join(", ")}` });
+      const patch: Partial<Omit<Pick<DocumentSection, "title" | "kind" | "level" | "startPage" | "endPage" | "order" | "status" | "parentId">, "parentId">> & { parentId?: string | null } = {
+        ...(typeof input.title === "string" ? { title: input.title } : {}),
+        ...(input.kind === "chapter" || input.kind === "section" ? { kind: input.kind } : {}),
+        ...(typeof input.level === "number" ? { level: input.level } : {}),
+        ...(typeof input.startPage === "number" ? { startPage: input.startPage } : {}),
+        ...(typeof input.endPage === "number" ? { endPage: input.endPage } : {}),
+        ...(typeof input.order === "number" ? { order: input.order } : {}),
+        ...(input.status === "proposed" || input.status === "accepted" || input.status === "excluded" ? { status: input.status } : {}),
+        ...(typeof input.parentId === "string" || input.parentId === null ? { parentId: input.parentId as string | null } : {}),
+      };
+      return send(response, 200, workspace.updateSection(section.id, patch, expectedCorpusRevision(input)));
+    }
+    if (request.method === "POST" && sectionSplitMatch) {
+      const input = await body(request);
+      const section = workspace.getSection(sectionSplitMatch[1]!);
+      if (!section) return send(response, 404, { error: "Section not found" });
+      await workspace.verifyDocumentAsset(section.documentId);
+      return send(
+        response,
+        200,
+        workspace.splitSection(
+          sectionSplitMatch[1]!,
+          Number(input.atPage),
+          typeof input.title === "string" ? input.title : undefined,
+          expectedCorpusRevision(input),
+        ),
+      );
+    }
+    if (request.method === "POST" && sectionMergeMatch) {
+      const input = await body(request);
+      if (typeof input.targetSectionId !== "string") return send(response, 400, { error: "Target section is required" });
+      const section = workspace.getSection(sectionMergeMatch[1]!);
+      if (!section) return send(response, 404, { error: "Section not found" });
+      await workspace.verifyDocumentAsset(section.documentId);
+      return send(response, 200, workspace.mergeSections(section.id, input.targetSectionId, expectedCorpusRevision(input)));
+    }
+    if (request.method === "POST" && sectionReorderMatch) {
+      const input = await body(request);
+      if (input.direction !== -1 && input.direction !== 1) return send(response, 400, { error: "Direction must be -1 or 1" });
+      const section = workspace.getSection(sectionReorderMatch[1]!);
+      if (!section) return send(response, 404, { error: "Section not found" });
+      await workspace.verifyDocumentAsset(section.documentId);
+      return send(response, 200, workspace.reorderSection(section.id, input.direction, expectedCorpusRevision(input)));
     }
 
     if (request.method === "GET" && url.pathname === "/api/audiobooks") {
@@ -286,6 +392,9 @@ const server = createServer(async (request, response) => {
       if (requestedSections.some((section) => !section || section.documentId !== document.id)) {
         return send(response, 400, { error: "Every selected section must belong to the document" });
       }
+      if (requestedSections.some((section) => section?.status !== "accepted")) {
+        return send(response, 422, { error: "Accept every selected section boundary before planning paid audiobook production" });
+      }
       const qualityApproved = new Set(Array.isArray(input.qualityApprovedSectionIds) ? input.qualityApprovedSectionIds.filter((id): id is string => typeof id === "string") : []);
       const providers = await providerRegistry();
       const capability = providers[input.provider]?.capability();
@@ -310,6 +419,7 @@ const server = createServer(async (request, response) => {
         documentId: document.id,
         documentHash: document.documentHash,
         extractionRevision: document.extractionRevision,
+        corpusRevision: document.corpusRevision,
         sections: requestedSections.map((section) => ({
           sectionId: section!.id,
           title: section!.title,
@@ -374,11 +484,14 @@ const server = createServer(async (request, response) => {
       const run = audiobooks.get(audiobookId!);
       if (!run) return send(response, 404, { error: "Audiobook run not found" });
       audiobooks.assertProcessable(audiobookId!);
+      if (!(await currentChunkSource(run, run.chunks[0]!))) {
+        return send(response, 409, { error: "The PDF, accepted section map, or reading copy changed after approval; create a new plan" });
+      }
       const providers = await providerRegistry();
       const capability = providers[run.provider]?.capability();
       if (!capability?.available) return send(response, 409, { error: capability?.reason ?? "Provider is unavailable" });
       scheduleAudioWork(async () => {
-        await audiobooks.process(audiobookId!, providers, { validateChunk: currentChunkSource });
+        await audiobooks.process(audiobookId!, providers, { validateChunk: (chunk) => currentChunkSource(run, chunk) });
       });
       return send(response, 202, run);
     }
@@ -401,6 +514,12 @@ const server = createServer(async (request, response) => {
       }
       if (typeof input.sectionId !== "string" || typeof input.voice !== "string" || !input.voice.trim()) {
         return send(response, 400, { error: "Section and voice are required" });
+      }
+      const section = workspace.getSection(input.sectionId);
+      if (!section) return send(response, 404, { error: "Section not found" });
+      await workspace.verifyDocumentAsset(section.documentId);
+      if (section.status !== "accepted") {
+        return send(response, 422, { error: "Accept this section boundary before generating paid provider audio" });
       }
       const providers = await providerRegistry();
       const provider = providers[input.provider];
@@ -470,6 +589,7 @@ const server = createServer(async (request, response) => {
                 : undefined,
           },
           typeof input.note === "string" ? input.note : "Reader repair",
+          expectedCorpusRevision(input),
         ),
       );
     }
@@ -479,7 +599,7 @@ const server = createServer(async (request, response) => {
       if (input.direction !== -1 && input.direction !== 1) {
         return send(response, 400, { error: "Direction must be -1 or 1" });
       }
-      return send(response, 200, workspace.reorderBlock(reorderMatch[1]!, input.direction));
+      return send(response, 200, workspace.reorderBlock(reorderMatch[1]!, input.direction, expectedCorpusRevision(input)));
     }
     const progressMatch = url.pathname.match(/^\/api\/documents\/([^/]+)\/progress$/);
     if (request.method === "GET" && progressMatch) {
@@ -528,6 +648,12 @@ const server = createServer(async (request, response) => {
     }
     return send(response, 404, { error: "Not found" });
   } catch (error) {
+    if (error instanceof CorpusRevisionConflictError) {
+      return send(response, 409, {
+        error: error.message,
+        current: workspace.corpusSummary(error.documentId),
+      });
+    }
     return send(response, 400, { error: error instanceof Error ? error.message : "Unexpected error" });
   }
 });

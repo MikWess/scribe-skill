@@ -212,6 +212,7 @@ export function createAudiobookPlan(input: CreateAudiobookPlanInput, idempotency
     documentId: input.documentId,
     documentHash: input.documentHash,
     extractionRevision: input.extractionRevision,
+    corpusRevision: input.corpusRevision,
     provider: input.provider,
     providerHost: input.providerHost,
     voice: input.voice,

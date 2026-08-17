@@ -27,14 +27,60 @@ interface DocumentRecord {
   originalName: string;
   documentHash: string;
   pageCount: number;
+  corpusRevision: number;
 }
 
 interface Section {
   id: string;
+  documentId: string;
+  parentId?: string;
   title: string;
+  kind: "chapter" | "section";
+  level: number;
   startPage: number;
   endPage: number;
   order: number;
+  confidence: number;
+  origin: "detected" | "user";
+  status: "proposed" | "accepted" | "excluded";
+  rationale: string;
+  structureRevision: number;
+}
+
+interface Passage {
+  id: string;
+  sectionId: string;
+  sequence: number;
+  sourceText: string;
+  readingText: string;
+  startPage: number;
+  endPage: number;
+  characterCount: number;
+  contentHash: string;
+  extractionRevision: number;
+  structureRevision: number;
+  quality: "good" | "review-needed" | "ocr-required";
+  evidence: Array<{
+    id: string;
+    page: number;
+    blockId: string;
+    characterRange: { start: number; end: number };
+    contentHash: string;
+  }>;
+}
+
+interface CorpusSummary {
+  structureRevision: number;
+  sectionCount: number;
+  passageCount: number;
+  tocEntryCount: number;
+  proposedSectionCount: number;
+  acceptedSectionCount: number;
+  excludedSectionCount: number;
+  reviewRequiredPages: number[];
+  ocrRequiredPages: number[];
+  ready: boolean;
+  blockers: string[];
 }
 
 interface Block {
@@ -66,6 +112,18 @@ interface Annotation {
 interface ImportResult {
   document: DocumentRecord;
   sections: Section[];
+  summary: CorpusSummary;
+}
+
+interface PassagePage {
+  items: Passage[];
+  nextOffset?: number;
+}
+
+class ApiError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+  }
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -75,7 +133,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const failure = (await response.json().catch(() => ({ error: response.statusText }))) as { error: string };
-    throw new Error(failure.error);
+    throw new ApiError(response.status, failure.error);
   }
   return (await response.json()) as T;
 }
@@ -90,6 +148,9 @@ export function App() {
   const [pdfPath, setPdfPath] = useState("");
   const [document, setDocument] = useState<DocumentRecord>();
   const [sections, setSections] = useState<Section[]>([]);
+  const [passages, setPassages] = useState<Passage[]>([]);
+  const [corpusSummary, setCorpusSummary] = useState<CorpusSummary>();
+  const [selectedSectionId, setSelectedSectionId] = useState<string>();
   const [pageNumber, setPageNumber] = useState(1);
   const [inspection, setInspection] = useState<Inspection>();
   const [renderSource, setRenderSource] = useState<string>();
@@ -100,15 +161,23 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [playback, setPlayback] = useState<"idle" | "playing" | "paused">("idle");
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("inspect");
+  const [splitPage, setSplitPage] = useState(2);
   const utteranceRef = useRef<SpeechSynthesisUtterance | undefined>(undefined);
 
   const selected = useMemo(
     () => inspection?.blocks.find(({ id }) => id === selectedId),
     [inspection, selectedId],
   );
-  const activeSection =
-    sections.find(({ startPage }) => startPage === pageNumber) ??
-    sections.find(({ startPage, endPage }) => pageNumber >= startPage && pageNumber <= endPage);
+  const selectedSection = sections.find(({ id }) => id === selectedSectionId);
+  const activeSection = selectedSection && pageNumber >= selectedSection.startPage && pageNumber <= selectedSection.endPage
+    ? selectedSection
+    : sections.find(({ startPage }) => startPage === pageNumber) ??
+      sections.find(({ startPage, endPage }) => pageNumber >= startPage && pageNumber <= endPage);
+  const activeNarrationSection = activeSection?.status === "excluded" ? undefined : activeSection;
+  const activeProductionSection = activeSection?.status === "accepted" ? activeSection : undefined;
+  const activeSectionIndex = activeSection ? sections.findIndex(({ id }) => id === activeSection.id) : -1;
+  const nextSection = activeSectionIndex >= 0 ? sections.slice(activeSectionIndex + 1).find(({ status }) => status !== "excluded") : undefined;
+  const activePassages = activeSection ? passages.filter(({ sectionId }) => sectionId === activeSection.id) : [];
 
   const loadPage = useCallback(
     async (documentId: string, page: number, preferredBlock?: string) => {
@@ -137,12 +206,34 @@ export function App() {
       window.localStorage.setItem(LAST_DOCUMENT_KEY, result.document.id);
       setDocument(result.document);
       setSections(result.sections);
+      setSelectedSectionId(result.sections.find(({ status }) => status !== "excluded")?.id ?? result.sections[0]?.id);
+      setPassages([]);
+      setCorpusSummary(result.summary);
       const [progress, notes] = await Promise.all([
         request<{ pageNumber: number; blockId?: string } | null>(`/api/documents/${result.document.id}/progress`),
         request<Annotation[]>(`/api/documents/${result.document.id}/annotations`),
       ]);
       setAnnotations(notes);
       await loadPage(result.document.id, progress?.pageNumber ?? 1, progress?.blockId);
+  }
+
+  async function refreshCorpus(documentId: string) {
+    const corpus = await request<Omit<ImportResult, "document">>(`/api/documents/${documentId}/corpus`);
+    setSections(corpus.sections);
+    if (!corpus.sections.some(({ id }) => id === selectedSectionId)) {
+      setSelectedSectionId(corpus.sections.find(({ status }) => status !== "excluded")?.id ?? corpus.sections[0]?.id);
+    }
+    setPassages([]);
+    setCorpusSummary(corpus.summary);
+  }
+
+  async function reportMutationError(error: unknown, fallback: string) {
+    if (error instanceof ApiError && error.status === 409 && document) {
+      await refreshCorpus(document.id);
+      setMessage(`${error.message}. Refreshed the latest corpus; review and try again.`);
+      return;
+    }
+    setMessage(error instanceof Error ? error.message : fallback);
   }
 
   useEffect(() => {
@@ -154,6 +245,31 @@ export function App() {
       .catch(() => window.localStorage.removeItem(LAST_DOCUMENT_KEY))
       .finally(() => setBusy(false));
   }, []);
+
+  useEffect(() => {
+    if (!document || !activeSection) {
+      setPassages([]);
+      return;
+    }
+    let cancelled = false;
+    const load = async () => {
+      const loaded: Passage[] = [];
+      let offset: number | undefined = 0;
+      while (offset !== undefined) {
+        const passagePage: PassagePage = await request<PassagePage>(
+          `/api/documents/${document.id}/passages?sectionId=${encodeURIComponent(activeSection.id)}&limit=200&offset=${offset}`,
+        );
+        loaded.push(...passagePage.items);
+        offset = passagePage.nextOffset;
+      }
+      if (!cancelled) setPassages(loaded);
+    };
+    setPassages([]);
+    void load().catch((error) => {
+      if (!cancelled) setMessage(error instanceof Error ? error.message : "Passages could not be loaded");
+    });
+    return () => { cancelled = true; };
+  }, [document?.id, activeSection?.id, corpusSummary?.structureRevision]);
 
   async function importPdf() {
     if (!pdfPath.trim()) return;
@@ -198,6 +314,11 @@ export function App() {
       body: JSON.stringify({ pageNumber, blockId: selected.id }),
     });
   }, [document, pageNumber, selected]);
+
+  useEffect(() => {
+    if (!activeSection) return;
+    setSplitPage(Math.min(activeSection.endPage, activeSection.startPage + 1));
+  }, [activeSection?.id, activeSection?.startPage, activeSection?.endPage]);
 
   useEffect(() => {
     if (!("mediaSession" in navigator) || !("speechSynthesis" in window)) return;
@@ -269,6 +390,7 @@ export function App() {
           order: patch.currentOrder,
           status: patch.status,
           note: "Reader repair",
+          expectedCorpusRevision: corpusSummary?.structureRevision ?? document.corpusRevision,
         }),
       });
       setInspection((current) =>
@@ -281,37 +403,92 @@ export function App() {
             }
           : current,
       );
+      await refreshCorpus(document.id);
       setMessage("Repair saved locally");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Repair failed");
+      await reportMutationError(error, "Repair failed");
     }
   }
 
   async function reorderSelected(direction: -1 | 1) {
-    if (!selected) return;
+    if (!selected || !document) return;
     try {
       const blocks = await request<Block[]>(`/api/blocks/${selected.id}/reorder`, {
         method: "POST",
-        body: JSON.stringify({ direction }),
+        body: JSON.stringify({ direction, expectedCorpusRevision: corpusSummary?.structureRevision ?? document.corpusRevision }),
       });
       setInspection((current) => current ? { ...current, blocks } : current);
+      await refreshCorpus(document.id);
       setMessage(direction < 0 ? "Moved earlier in reading order" : "Moved later in reading order");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Reading order update failed");
+      await reportMutationError(error, "Reading order update failed");
     }
   }
 
   async function updateSection(patch: Partial<Section>) {
-    if (!activeSection) return;
+    if (!activeSection || !document) return;
     try {
       const updated = await request<Section>(`/api/sections/${activeSection.id}`, {
         method: "PATCH",
-        body: JSON.stringify(patch),
+        body: JSON.stringify({ ...patch, expectedCorpusRevision: corpusSummary?.structureRevision ?? document.corpusRevision }),
       });
       setSections((current) => current.map((section) => (section.id === updated.id ? updated : section)));
+      await refreshCorpus(document.id);
       setMessage("Section guide updated");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Section update failed");
+      await reportMutationError(error, "Section update failed");
+    }
+  }
+
+  async function splitActiveSection() {
+    if (!activeSection || !document) return;
+    try {
+      const next = await request<Section[]>(`/api/sections/${activeSection.id}/split`, {
+        method: "POST",
+        body: JSON.stringify({
+          atPage: splitPage,
+          title: `${activeSection.title} — continued`,
+          expectedCorpusRevision: corpusSummary?.structureRevision ?? document.corpusRevision,
+        }),
+      });
+      setSections(next);
+      await refreshCorpus(document.id);
+      setMessage(`Split ${activeSection.title} at page ${splitPage}`);
+    } catch (error) {
+      await reportMutationError(error, "Section split failed");
+    }
+  }
+
+  async function mergeActiveWithNext() {
+    if (!activeSection || !nextSection || !document) return;
+    try {
+      const next = await request<Section[]>(`/api/sections/${activeSection.id}/merge`, {
+        method: "POST",
+        body: JSON.stringify({
+          targetSectionId: nextSection.id,
+          expectedCorpusRevision: corpusSummary?.structureRevision ?? document.corpusRevision,
+        }),
+      });
+      setSections(next);
+      await refreshCorpus(document.id);
+      setMessage(`Merged ${activeSection.title} with the next section`);
+    } catch (error) {
+      await reportMutationError(error, "Section merge failed");
+    }
+  }
+
+  async function reorderActiveSection(direction: -1 | 1) {
+    if (!activeSection || !document) return;
+    try {
+      const next = await request<Section[]>(`/api/sections/${activeSection.id}/reorder`, {
+        method: "POST",
+        body: JSON.stringify({ direction, expectedCorpusRevision: corpusSummary?.structureRevision ?? document.corpusRevision }),
+      });
+      setSections(next);
+      await refreshCorpus(document.id);
+      setMessage(direction < 0 ? "Moved chapter earlier" : "Moved chapter later");
+    } catch (error) {
+      await reportMutationError(error, "Section reorder failed");
     }
   }
 
@@ -357,6 +534,10 @@ export function App() {
     stopPlayback();
     window.localStorage.removeItem(LAST_DOCUMENT_KEY);
     setDocument(undefined);
+    setSections([]);
+    setSelectedSectionId(undefined);
+    setPassages([]);
+    setCorpusSummary(undefined);
     setWorkspaceView("inspect");
     setMessage("Local service ready");
   }
@@ -394,7 +575,7 @@ export function App() {
           <div className="wordmark"><span aria-hidden="true">S/S</span> ScribeSkill</div>
           <div className="document-title">{document.originalName}</div>
         </button>
-        <div className="source-status" data-quality={inspection?.page.quality}>
+        <div className="source-status" data-quality={inspection?.page.quality} role="status" aria-live="polite" aria-atomic="true">
           <span aria-hidden="true">●</span> {message}
         </div>
         <div className="top-actions">
@@ -405,17 +586,32 @@ export function App() {
 
       <div className="reader-grid">
         <nav className="section-rail" aria-label="Book sections">
-          <div className="rail-intro"><div className="rail-label">BOOK MAP</div><p>Jump through the source. Rename page ranges into useful chapters as you work.</p></div>
+          <div className="rail-intro">
+            <div className="rail-label">BOOK MAP · REV {corpusSummary?.structureRevision ?? 1}</div>
+            <p>Detected chapters are proposals. Review them here; passages keep exact source evidence for later search, graph, and skill work.</p>
+            <div className="corpus-meter" data-ready={corpusSummary?.ready ?? false}>
+              <strong>{corpusSummary?.sectionCount ?? sections.length} sections</strong>
+              <span>{corpusSummary?.passageCount ?? passages.length} cited passages</span>
+              {!!corpusSummary?.tocEntryCount && <span>{corpusSummary.tocEntryCount} TOC entries found</span>}
+              {!!corpusSummary?.ocrRequiredPages.length && <span>{corpusSummary.ocrRequiredPages.length} OCR blockers</span>}
+              {!!corpusSummary?.reviewRequiredPages.length && <span>{corpusSummary.reviewRequiredPages.length} pages need review</span>}
+            </div>
+          </div>
           {sections.map((section) => (
             <button
               key={section.id}
-              className={activeSection?.id === section.id ? "section active" : "section"}
+              className={`${activeSection?.id === section.id ? "section active" : "section"} ${section.status}`}
               aria-current={activeSection?.id === section.id ? "location" : undefined}
-              onClick={() => void loadPage(document.id, section.startPage)}
+              onClick={() => {
+                setSelectedSectionId(section.id);
+                void loadPage(document.id, section.startPage);
+              }}
+              style={{ paddingLeft: `${8 + Math.max(0, section.level - 1) * 12}px` }}
             >
               <span>{String(section.order + 1).padStart(2, "0")}</span>
               <strong>{section.title}</strong>
-              <small>pp. {section.startPage}–{section.endPage}</small>
+              <small>{section.kind} · pp. {section.startPage}–{section.endPage}</small>
+              <small>{section.status} · {Math.round(section.confidence * 100)}% confidence</small>
             </button>
           ))}
           <div className="rail-footer">
@@ -492,13 +688,59 @@ export function App() {
           {workspaceView === "inspect" && <div id="workspace-panel-inspect" role="tabpanel" aria-labelledby="workspace-tab-inspect" className="workspace-panel">
             <div className="workspace-explainer"><span>NO KEY NEEDED</span><h2>Inspect the source.</h2><p>Choose a highlighted region on the page. Repair only the reading copy; every note still cites the immutable extraction.</p></div>
             {activeSection && <details className="section-editor">
-              <summary>Shape this page into a chapter guide</summary>
+              <summary>Review this {activeSection.kind} and its passages</summary>
               <div className="section-editor-body">
-                <label>Section title<input key={`${activeSection.id}-title`} defaultValue={activeSection.title} onBlur={(event) => void updateSection({ title: event.target.value })} /></label>
-                <div className="range-fields">
-                  <label>From page<input key={`${activeSection.id}-from`} type="number" min="1" max={document.pageCount} defaultValue={activeSection.startPage} onBlur={(event) => void updateSection({ startPage: Number(event.target.value) })} /></label>
-                  <label>To page<input key={`${activeSection.id}-to`} type="number" min="1" max={document.pageCount} defaultValue={activeSection.endPage} onBlur={(event) => void updateSection({ endPage: Number(event.target.value) })} /></label>
+                <div className="section-proposal-meta">
+                  <strong>{activeSection.origin === "detected" ? "DETECTED PROPOSAL" : "USER REVIEWED"}</strong>
+                  <span>{Math.round(activeSection.confidence * 100)}% confidence · {activePassages.length} {activePassages.length === 1 ? "passage" : "passages"}</span>
+                  <p>{activeSection.rationale}</p>
                 </div>
+                <label>Section title<input key={`${activeSection.id}-title-${activeSection.title}`} defaultValue={activeSection.title} onBlur={(event) => void updateSection({ title: event.target.value })} /></label>
+                <label>Structure type<select value={activeSection.kind} onChange={(event) => void updateSection({ kind: event.target.value as Section["kind"], level: event.target.value === "chapter" ? 1 : 2 })}><option value="chapter">Chapter</option><option value="section">Section</option></select></label>
+                <div className="range-fields">
+                  <label>From page<input key={`${activeSection.id}-from-${activeSection.startPage}`} type="number" min="1" max={document.pageCount} defaultValue={activeSection.startPage} onBlur={(event) => void updateSection({ startPage: Number(event.target.value) })} /></label>
+                  <label>To page<input key={`${activeSection.id}-to-${activeSection.endPage}`} type="number" min="1" max={document.pageCount} defaultValue={activeSection.endPage} onBlur={(event) => void updateSection({ endPage: Number(event.target.value) })} /></label>
+                </div>
+                <div className="section-review-actions">
+                  <button className="accept" aria-pressed={activeSection.status === "accepted"} onClick={() => void updateSection({ status: "accepted" })}>Accept</button>
+                  <button aria-pressed={activeSection.status === "proposed"} onClick={() => void updateSection({ status: "proposed" })}>Needs review</button>
+                  <button className="exclude" aria-pressed={activeSection.status === "excluded"} onClick={() => void updateSection({ status: "excluded" })}>Exclude</button>
+                </div>
+                <div className="section-review-actions">
+                  <button disabled={activeSectionIndex <= 0} onClick={() => void reorderActiveSection(-1)}>Move earlier</button>
+                  <button disabled={activeSectionIndex < 0 || activeSectionIndex >= sections.length - 1} onClick={() => void reorderActiveSection(1)}>Move later</button>
+                  <button disabled={!nextSection} onClick={() => void mergeActiveWithNext()}>Merge next</button>
+                </div>
+                <div className="section-split-row">
+                  <label>Split before page<input type="number" min={activeSection.startPage + 1} max={activeSection.endPage} value={splitPage} disabled={activeSection.endPage <= activeSection.startPage} onChange={(event) => setSplitPage(Number(event.target.value))} /></label>
+                  <button disabled={activeSection.endPage <= activeSection.startPage} onClick={() => void splitActiveSection()}>Split section</button>
+                </div>
+                <details className="passage-preview">
+                  <summary>{activePassages.length} citation-ready passages</summary>
+                  <p className="segmentation-note">Passages anchor search, graph, and skill context. Audio follows the reviewed section boundary, then splits it into provider-sized parts.</p>
+                  {activePassages.length ? activePassages.map((passage) => <details className="passage-trace" key={passage.id}>
+                    <summary>
+                      <span>PASSAGE {passage.sequence + 1} · PP. {passage.startPage}–{passage.endPage} · {passage.quality}</span>
+                      <small>{passage.evidence.length} anchors · {passage.characterCount} characters</small>
+                    </summary>
+                    <div className="passage-copy-compare">
+                      <div><strong>Immutable source</strong><p>{passage.sourceText}</p></div>
+                      <div><strong>Reading copy</strong><p>{passage.readingText}</p></div>
+                    </div>
+                    <div className="passage-integrity"><span>Content</span><code title={passage.contentHash}>{passage.contentHash}</code><span>Extraction r{passage.extractionRevision} · section r{passage.structureRevision}</span></div>
+                    <div className="anchor-list" aria-label={`Evidence anchors for passage ${passage.sequence + 1}`}>
+                      {passage.evidence.map((anchor) => <button
+                        key={anchor.id}
+                        onClick={() => void loadPage(document.id, anchor.page, anchor.blockId)}
+                        title={`${anchor.contentHash} · characters ${anchor.characterRange.start}–${anchor.characterRange.end}`}
+                      >
+                        <strong>Page {anchor.page}</strong>
+                        <span>{anchor.blockId}</span>
+                        <small>chars {anchor.characterRange.start}–{anchor.characterRange.end} · open exact highlight →</small>
+                      </button>)}
+                    </div>
+                  </details>) : <p>No passages are available until this range has readable, included text.</p>}
+                </details>
               </div>
             </details>}
             <div className="block-list" aria-label="Extracted reading order">
@@ -548,15 +790,21 @@ export function App() {
             </div> : <div className="empty-inspector">Select a highlighted source region on the page to inspect it.</div>}
           </div>}
 
-          {workspaceView === "listen" && activeSection && <div id="workspace-panel-listen" role="tabpanel" aria-labelledby="workspace-tab-listen" className="workspace-panel">
-            <div className="workspace-explainer"><span>DEVICE VOICE IS FREE</span><h2>Listen beside the page.</h2><p>Preview locally with no key. Add OpenAI or ElevenLabs only when you want to generate and cache a reusable audio file.</p></div>
-            <NarrationPanel section={activeSection} documentName={document.originalName} requestJson={request} fetchArtifact={fetchAudioArtifact} />
+          {workspaceView === "listen" && activeNarrationSection && <div id="workspace-panel-listen" role="tabpanel" aria-labelledby="workspace-tab-listen" className="workspace-panel">
+            <div className="workspace-explainer"><span>DEVICE VOICE IS FREE</span><h2>Listen beside the page.</h2><p>Preview locally with no key. Reviewed section boundaries become tracks; reusable provider audio is split again only to fit provider limits.</p></div>
+            <NarrationPanel section={activeNarrationSection} documentName={document.originalName} requestJson={request} fetchArtifact={fetchAudioArtifact} />
           </div>}
+          {workspaceView === "listen" && !activeNarrationSection && <div id="workspace-panel-listen" role="tabpanel" aria-labelledby="workspace-tab-listen" className="empty-inspector">This section is excluded from derived passages and narration. Accept it or return it to review before listening.</div>}
 
-          {workspaceView === "produce" && activeSection && <div id="workspace-panel-produce" role="tabpanel" aria-labelledby="workspace-tab-produce" className="workspace-panel">
-            <div className="workspace-explainer"><span>PLAN LOCALLY · SPEND DELIBERATELY</span><h2>Produce a cited package.</h2><p>Create a free dry run first. Provider calls stay locked until you confirm the exact chunks, budget, and rights scope.</p></div>
+          {workspaceView === "produce" && activeProductionSection && <div id="workspace-panel-produce" role="tabpanel" aria-labelledby="workspace-tab-produce" className="workspace-panel">
+            <div className="workspace-explainer"><span>PLAN LOCALLY · SPEND DELIBERATELY</span><h2>Produce a cited package.</h2><p>Create a free dry run first. Each reviewed section is a track; the plan shows every provider-sized part before any paid call.</p></div>
             <button className="inline-route" onClick={() => setWorkspaceView("listen")}>Need a provider key? Configure it in Listen <span aria-hidden="true">→</span></button>
-            <AudiobookPanel documentId={document.id} sections={sections} activeSection={activeSection} requestJson={request} />
+            <AudiobookPanel documentId={document.id} sections={sections.filter(({ status }) => status === "accepted")} activeSection={activeProductionSection} requestJson={request} />
+          </div>}
+          {workspaceView === "produce" && !activeProductionSection && <div id="workspace-panel-produce" role="tabpanel" aria-labelledby="workspace-tab-produce" className="empty-inspector">
+            <strong>Review this boundary before paid production.</strong>
+            <p>{activeSection?.status === "excluded" ? "Excluded sections cannot enter audiobook production." : "Detected chapters are proposals until you accept them. Device preview remains available in Listen."}</p>
+            {activeSection && activeSection.status === "proposed" && <button className="accept-boundary" onClick={() => void updateSection({ status: "accepted" })}>Accept section boundary</button>}
           </div>}
         </aside>
       </div>
