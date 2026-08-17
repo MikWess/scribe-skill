@@ -140,7 +140,7 @@ A reader can find where the author develops an idea and inspect the original wor
 
 ### Implementation note — 2026-08-17
 
-Implemented as the next stacked slice: a revision-pinned `search.query` contract, incremental SQLite FTS5 source index, exact evidence inspector, explicit accepted/proposed scope, whole-passage character budgets, injection-shaped fixture coverage, and a frozen 20-query evaluation. The private *Good Strategy/Bad Strategy* golden-book run remains a local verification step because that PDF was not found in the workspace or indexed device search.
+Implemented as the next stacked slice: a revision-pinned `search.query` contract, incremental SQLite FTS5 source index, exact evidence inspector, explicit accepted/proposed scope, whole-passage character budgets, injection-shaped fixture coverage, and a frozen 20-query evaluation. The private 200-page *Good Strategy/Bad Strategy* run also passed 20/20 hand-specified body-page queries after a real-book iteration fixed plain contents, word-numbered chapters, terminal back matter, and body-first ranking; no private source content is committed.
 
 ## PR #10 — Add bounded AI execution, grounded Q&A, and saved insights
 

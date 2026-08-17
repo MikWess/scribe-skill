@@ -125,8 +125,11 @@ function normalizedTitle(text: string): string {
   return text.replace(/\s+/g, " ").trim().replace(/\s+\.{2,}\s*\d+\s*$/, "");
 }
 
-const numberedBookHeading = /^(?:chapter|part)\s+(?:\d+|[ivxlcdm]+|one|two|three|four|five|six|seven|eight|nine|ten)\b|^book\s+(?:\d+|[ivxlcdm]+)\b/i;
+const writtenNumber = "(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty)";
+const numberedBookHeading = new RegExp(`^(?:chapter|part)\\s+(?:\\d+|[ivxlcdm]+|${writtenNumber})\\b|^book\\s+(?:\\d+|[ivxlcdm]+|${writtenNumber})\\b`, "i");
 const tocLinePattern = /^(.+?)(?:\s*\.{2,}\s*|\s{2,})(\d{1,4})$/;
+const namedBookSectionPattern = /^(contents|table of contents|introduction|preface|prologue|foreword|conclusion|epilogue|appendix|notes|endnotes|bibliography|references|acknowledgments|index)\b/i;
+const terminalBackMatterPattern = /^(notes|endnotes|bibliography|references|acknowledgments|index)$/i;
 
 function tocPages(blocks: CorpusBlockInput[]): Set<number> {
   const ordered = blocks
@@ -153,16 +156,18 @@ function headingCandidate(block: CorpusBlockInput, typicalHeight: number): Headi
   const title = normalizedTitle(block.currentText);
   const words = title.split(/\s+/).filter(Boolean);
   if (title.length < 2 || title.length > 140 || words.length > 18) return undefined;
-  if (/^[\d\s.]+$/.test(title) || /[.!?]$/.test(title) && !/^(chapter|part)\b/i.test(title)) return undefined;
-
-  const keyword = numberedBookHeading.test(title);
-  const namedFrontMatter = /^(contents|table of contents|introduction|preface|prologue|foreword|conclusion|epilogue|appendix|notes|bibliography|index)\b/i.test(title);
-  const sizeRatio = typicalHeight > 0 ? block.height / typicalHeight : 1;
   const uppercaseLetters = [...title].filter((character) => /\p{L}/u.test(character));
   const uppercaseRatio = uppercaseLetters.length
     ? uppercaseLetters.filter((character) => character === character.toUpperCase()).length / uppercaseLetters.length
     : 0;
+  if (/^[\d\s.]+$/.test(title) || /[.!?…”’")\]]$/.test(title) && uppercaseRatio < 0.82) return undefined;
+
+  const keyword = numberedBookHeading.test(title);
+  const namedFrontMatter = namedBookSectionPattern.test(title);
+  const sizeRatio = typicalHeight > 0 ? block.height / typicalHeight : 1;
   const titleRatio = titleCaseRatio(title);
+  const hasHeadingForm = uppercaseRatio >= 0.82 || titleRatio >= 0.72 || sizeRatio >= 1.28;
+  if (keyword && !hasHeadingForm) return undefined;
   const signals: string[] = [];
   let score = 0;
 
@@ -200,6 +205,42 @@ function headingCandidate(block: CorpusBlockInput, typicalHeight: number): Headi
     confidence: Math.min(0.96, Math.max(0.45, score)),
     rationale: `Detected from ${signals.join(", ") || "heading form"}.`,
   };
+}
+
+function plainContentsBlockIds(blocks: CorpusBlockInput[], typicalHeight: number): Set<string> {
+  const ordered = blocks
+    .filter(({ status }) => status === "included")
+    .sort((left, right) => left.pageNumber - right.pageNumber || left.currentOrder - right.currentOrder);
+  const result = new Set<string>();
+  for (const [startIndex, start] of ordered.entries()) {
+    if (!/^(contents|table of contents)$/i.test(normalizedTitle(start.currentText))) continue;
+    const navigationTitles = new Set<string>();
+    let navigationHeadingCount = 0;
+    let bodyStartIndex = -1;
+    for (let index = startIndex + 1; index < ordered.length; index += 1) {
+      const block = ordered[index]!;
+      if (block.pageNumber > start.pageNumber + 12) break;
+      const title = normalizedTitle(block.currentText);
+      const key = title.toLocaleLowerCase();
+      const sizeRatio = typicalHeight > 0 ? block.height / typicalHeight : 1;
+      if (
+        navigationHeadingCount >= 2 &&
+        sizeRatio >= 1.18 &&
+        navigationTitles.has(key) &&
+        headingCandidate(block, typicalHeight)
+      ) {
+        bodyStartIndex = index;
+        break;
+      }
+      if (numberedBookHeading.test(title) || namedBookSectionPattern.test(title)) {
+        navigationTitles.add(key);
+        navigationHeadingCount += 1;
+      }
+    }
+    if (bodyStartIndex < 0) continue;
+    for (let index = startIndex; index < bodyStartIndex; index += 1) result.add(ordered[index]!.id);
+  }
+  return result;
 }
 
 function fallbackTitle(documentName: string): string {
@@ -251,10 +292,21 @@ export function proposeCorpusSections(
     return candidate ? [candidate] : [];
   });
   const contentsPages = tocPages(included);
+  const plainContentsBlocks = plainContentsBlockIds(included, typicalHeight);
   const tocEntries = detectTocEntries(included);
   let headings = candidates.filter(({ block, title }) => {
-    if (!contentsPages.has(block.pageNumber)) return true;
+    if (!contentsPages.has(block.pageNumber) && !plainContentsBlocks.has(block.id)) return true;
     return /^(contents|table of contents)$/i.test(title);
+  });
+
+  let insideTerminalBackMatter = false;
+  const terminalBackMatterStartPage = Math.max(1, Math.floor(pageCount * 0.6));
+  headings = headings.filter(({ block, title }) => {
+    if (block.pageNumber >= terminalBackMatterStartPage && terminalBackMatterPattern.test(title)) {
+      insideTerminalBackMatter = true;
+      return true;
+    }
+    return !insideTerminalBackMatter;
   });
 
   const contentHeadings = headings.filter(({ title }) => !/^(contents|table of contents)$/i.test(title));

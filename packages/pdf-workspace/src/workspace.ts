@@ -1444,12 +1444,13 @@ export class PdfWorkspace {
       .prepare(
         `SELECT p.*, s.title AS section_title, s.kind AS section_kind, s.status AS section_status,
           s.section_order, s.start_page AS section_start_page, s.end_page AS section_end_page,
+          CASE WHEN lower(trim(s.title)) IN ('contents', 'table of contents', 'notes', 'endnotes', 'bibliography', 'references', 'acknowledgments', 'index') THEN 1 ELSE 0 END AS navigation_penalty,
           bm25(passage_search, 0, 0, 0, 1) AS lexical_rank
          FROM passage_search
          JOIN passages p ON p.id = passage_search.passage_id
          JOIN sections s ON s.id = p.section_id
          WHERE ${clauses.join(" AND ")}
-         ORDER BY lexical_rank ASC, s.section_order ASC, p.passage_sequence ASC, p.id ASC
+         ORDER BY navigation_penalty ASC, lexical_rank ASC, s.section_order ASC, p.passage_sequence ASC, p.id ASC
          LIMIT ?`,
       )
       .all(...parameters, candidateLimit);
@@ -1479,7 +1480,7 @@ export class PdfWorkspace {
       results.push({
         rank: results.length + 1,
         score: Number(Math.max(0, -Number(row.lexical_rank)).toFixed(8)),
-        scoreExplanation: `${matchedTerms.length} of ${terms.length} normalized query terms matched immutable source text; SQLite FTS5 BM25 ordered this result with stable section and passage tie-breaks.`,
+        scoreExplanation: `${matchedTerms.length} of ${terms.length} normalized query terms matched immutable source text; body sections are preferred to contents, notes, and index navigation before SQLite FTS5 BM25 and stable tie-breaks are applied.`,
         labels: { passage: "source", ranking: "derived", snippet: "derived-from-source" },
         trust: "untrusted-source",
         passage: {

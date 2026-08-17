@@ -95,6 +95,36 @@ async function createChapteredPdf(path: string): Promise<void> {
   await writeFile(path, await pdf.save());
 }
 
+async function createPlainContentsAndBackMatterPdf(path: string): Promise<void> {
+  const pdf = await PDFDocument.create();
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  const contents = pdf.addPage([600, 800]);
+  contents.drawText("CONTENTS", { x: 50, y: 750, size: 22, font });
+  contents.drawText("CHAPTER ONE OPENING", { x: 50, y: 700, size: 11, font });
+  contents.drawText("A useful opening topic", { x: 50, y: 675, size: 11, font });
+  const contentsContinued = pdf.addPage([600, 800]);
+  contentsContinued.drawText("CHAPTER TWO MIDDLE", { x: 50, y: 730, size: 11, font });
+  contentsContinued.drawText("CHAPTER ELEVEN GROWTH", { x: 50, y: 705, size: 11, font });
+  const opening = pdf.addPage([600, 800]);
+  opening.drawText("CHAPTER ONE OPENING", { x: 50, y: 750, size: 14, font });
+  opening.drawText("Opening evidence explains the initial problem.", { x: 50, y: 700, size: 11, font });
+  const middle = pdf.addPage([600, 800]);
+  middle.drawText("CHAPTER TWO MIDDLE", { x: 50, y: 750, size: 14, font });
+  middle.drawText("Middle evidence separates the body sections.", { x: 50, y: 700, size: 11, font });
+  const growth = pdf.addPage([600, 800]);
+  growth.drawText("CHAPTER ELEVEN GROWTH", { x: 50, y: 750, size: 14, font });
+  growth.drawText("chapter eleven begins with a tactical reversal", { x: 50, y: 720, size: 11, font });
+  growth.drawText("Growth evidence belongs in the chapter body.", { x: 50, y: 700, size: 11, font });
+  const notes = pdf.addPage([600, 800]);
+  notes.drawText("NOTES", { x: 50, y: 750, size: 22, font });
+  notes.drawText("CHAPTER 1: OPENING", { x: 50, y: 710, size: 14, font });
+  notes.drawText("A citation note for the opening chapter.", { x: 50, y: 675, size: 11, font });
+  const index = pdf.addPage([600, 800]);
+  index.drawText("INDEX", { x: 50, y: 750, size: 22, font });
+  index.drawText("growth, chapter eleven", { x: 50, y: 700, size: 11, font });
+  await writeFile(path, await pdf.save());
+}
+
 async function createMultiPageTocPdf(path: string): Promise<void> {
   const pdf = await PDFDocument.create();
   const font = await pdf.embedFont(StandardFonts.Helvetica);
@@ -503,6 +533,37 @@ test("meets the frozen 20-query cited-retrieval evaluation gate", async (t) => {
   }
   assert.equal(evaluations.length, 20);
   assert.ok(relevantInTopFive >= 18, `Expected at least 18/20 relevant top-five results, received ${relevantInTopFive}/20`);
+});
+
+test("suppresses plain multi-page contents and note subheadings while preferring body evidence", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "scribe-skill-plain-contents-"));
+  const pdfPath = join(root, "plain-contents.pdf");
+  await createPlainContentsAndBackMatterPdf(pdfPath);
+  const workspace = await PdfWorkspace.open(join(root, "library"));
+  t.after(async () => {
+    workspace.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  let document = await workspace.importPdf(pdfPath);
+  const sections = workspace.listSections(document.id);
+  assert.deepEqual(
+    sections.map(({ title, startPage, endPage }) => [title, startPage, endPage]),
+    [
+      ["CONTENTS", 1, 2],
+      ["CHAPTER ONE OPENING", 3, 3],
+      ["CHAPTER TWO MIDDLE", 4, 4],
+      ["CHAPTER ELEVEN GROWTH", 5, 5],
+      ["NOTES", 6, 6],
+      ["INDEX", 7, 7],
+    ],
+  );
+  for (const section of sections) {
+    workspace.updateSection(section.id, { status: "accepted" }, document.corpusRevision);
+    document = workspace.getDocument(document.id)!;
+  }
+  const response = await workspace.searchQuery({ ...searchInput(document, "chapter eleven growth"), limit: 5 });
+  assert.equal(response.results[0]?.section.title, "CHAPTER ELEVEN GROWTH");
+  assert.equal(response.results[0]?.preferredEvidenceId, response.results[0]?.evidence.find(({ page }) => page === 5)?.id);
 });
 
 test("persists chapter review, split, merge, and passage revisions across restart", async (t) => {
