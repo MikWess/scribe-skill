@@ -177,6 +177,10 @@ Turn cited retrieval into trustworthy inquiry while making Codex-session executi
 
 A user can ask “What does the author mean by a kernel of strategy?” and move from the answer to the exact supporting pages. The saved insight remains understandable later because its evidence and execution provenance travel with it.
 
+### Guided-inquiry foundation — 2026-08-18
+
+A first local-only slice now persists branching inquiry sessions before model execution is introduced. A human or agent chooses an understand, challenge, apply, or reflect route; local retrieval freezes a bounded accepted-passage set; each response is labeled as citation-required book interpretation or user-authored personal reflection; and the session can deepen, challenge, connect, apply, synthesize, complete, resume, edit, export, or delete. This keeps PR #10's eventual Codex/BYOK/local execution focused on generating into an already useful, inspectable contract instead of creating another isolated chat transcript.
+
 ## PR #11 — Create the versioned evidence-graph store
 
 ### Goal

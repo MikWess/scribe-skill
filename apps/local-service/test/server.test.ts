@@ -144,6 +144,98 @@ test("serves a token-protected, cited reader workflow over loopback", async (t) 
   assert.match((await unavailable.json() as { error: string }).error, /key is not configured/);
 });
 
+test("serves resumable cited inquiry sessions to humans and agents without a provider key", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "scribe-skill-inquiry-service-"));
+  const pdfPath = join(root, "inquiry.pdf");
+  const pdf = await PDFDocument.create();
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  pdf.addPage([600, 800]).drawText("A good strategy diagnoses the central challenge before choosing action.", {
+    x: 50,
+    y: 720,
+    size: 12,
+    font,
+  });
+  await writeFile(pdfPath, await pdf.save());
+  const token = "inquiry-token";
+  const headers = { "content-type": "application/json", "x-scribe-token": token };
+  const service = await startLocalService({ token, workspacePath: join(root, "library") });
+  t.after(async () => {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const imported = await fetch(`${service.url}/api/import`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ path: pdfPath }),
+  }).then((response) => response.json()) as {
+    document: { id: string };
+    sections: Array<{ id: string }>;
+    summary: { structureRevision: number };
+  };
+  await fetch(`${service.url}/api/sections/${imported.sections[0]!.id}`, {
+    method: "PATCH",
+    headers,
+    body: JSON.stringify({ status: "accepted", expectedCorpusRevision: imported.summary.structureRevision }),
+  });
+
+  const routes = await fetch(`${service.url}/api/inquiry/routes`, { headers })
+    .then((response) => response.json()) as { schemaVersion: string; routes: Array<{ id: string }> };
+  assert.equal(routes.schemaVersion, "1");
+  assert.deepEqual(routes.routes.map(({ id }) => id), ["understand", "challenge", "apply", "reflect"]);
+  const missingKey = await fetch(`${service.url}/api/inquiries`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ documentId: imported.document.id, routeId: "understand", objective: "central challenge" }),
+  });
+  assert.equal(missingKey.status, 400);
+  assert.match((await missingKey.json() as { error: string }).error, /idempotency key/i);
+
+  const createdResponse = await fetch(`${service.url}/api/inquiries`, {
+    method: "POST",
+    headers: { ...headers, "idempotency-key": "agent-inquiry-1" },
+    body: JSON.stringify({ documentId: imported.document.id, routeId: "understand", objective: "central challenge" }),
+  });
+  assert.equal(createdResponse.status, 201);
+  const created = await createdResponse.json() as {
+    id: string;
+    currentStepId: string;
+    evidence: Array<{ passageId: string; evidence: Array<{ page: number }> }>;
+  };
+  assert.equal(created.evidence[0]?.evidence[0]?.page, 1);
+  const answered = await fetch(`${service.url}/api/inquiries/${created.id}/steps/${created.currentStepId}/answer`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      response: "The source makes diagnosis precede action.",
+      responseKind: "grounded-interpretation",
+      evidencePassageIds: [created.evidence[0]!.passageId],
+      nextMove: "challenge",
+    }),
+  }).then((response) => response.json()) as { currentStepId: string; steps: unknown[] };
+  assert.equal(answered.steps.length, 2);
+  const completed = await fetch(`${service.url}/api/inquiries/${created.id}/steps/${answered.currentStepId}/answer`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      response: "My situation still needs a more precise diagnosis.",
+      responseKind: "personal-reflection",
+      evidencePassageIds: [],
+      nextMove: "complete",
+    }),
+  }).then((response) => response.json()) as { status: string };
+  assert.equal(completed.status, "completed");
+  const markdown = await fetch(`${service.url}/api/inquiries/${created.id}/export.md`, { headers }).then((response) => response.text());
+  assert.match(markdown, /Grounded interpretation/);
+  assert.match(markdown, /Personal reflection/);
+  assert.match(markdown, /Preferred source anchors: `anchor-/);
+  const listed = await fetch(`${service.url}/api/documents/${imported.document.id}/inquiries`, { headers })
+    .then((response) => response.json()) as Array<{ id: string }>;
+  assert.equal(listed[0]?.id, created.id);
+  const deleted = await fetch(`${service.url}/api/inquiries/${created.id}`, { method: "DELETE", headers });
+  assert.equal(deleted.status, 200);
+  assert.equal((await deleted.json() as { deleted: boolean }).deleted, true);
+});
+
 test("rejects corpus, section, and passage reads after source-asset tampering", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "scribe-skill-service-integrity-"));
   const pdfPath = join(root, "integrity.pdf");
@@ -168,7 +260,7 @@ test("rejects corpus, section, and passage reads after source-asset tampering", 
   };
   await writeFile(imported.document.assetPath, "tampered");
 
-  for (const path of ["corpus", "sections", "passages"]) {
+  for (const path of ["corpus", "sections", "passages", "inquiries"]) {
     const response = await fetch(`${service.url}/api/documents/${imported.document.id}/${path}`, { headers });
     assert.equal(response.status, 400);
     assert.match((await response.json() as { error: string }).error, /hash does not match/i);

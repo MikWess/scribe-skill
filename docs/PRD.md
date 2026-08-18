@@ -94,6 +94,9 @@ Readers who want to move fluidly between page, audio, note-taking, and deep inqu
 - `search.query` requires a source revision and accepts bounded chapter/page/quality/review/visual filters, result limit, and source-character context budget.
 - Search returns whole passages with complete evidence anchors, a preferred exact page-region highlight, extraction quality, visible review state, and explicit source-vs-derived labels. Book text is untrusted data, never agent instruction.
 - Accepted chapters are the default retrieval scope. Proposed boundaries require explicit opt-in; excluded passages are not current evidence.
+- Guided inquiry offers understand, challenge, apply, and reflect routes over bounded accepted passages without requiring a model or API key.
+- Inquiry sessions branch through explicit deepen/challenge/connect/apply/synthesize moves, persist locally, and distinguish citation-required book interpretation from user-authored personal reflection.
+- Sessions become stale rather than silently retargeting evidence when the reviewed corpus changes; users and agents can inspect, edit, resume, export, and delete them.
 - Answers display citations and distinguish book evidence from model synthesis.
 - Users can create, search, export, and delete local notes/insights.
 - Annotations preserve exact source selections and export as Markdown plus structured evidence data; annotations distinguish source, model-derived, and user-authored content.

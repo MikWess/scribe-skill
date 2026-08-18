@@ -16,7 +16,7 @@ import type { CreateAudiobookPlanInput, ProductionChunk } from "@scribe-skill/au
 import { getCodexCapability, sha256 } from "@scribe-skill/core";
 import type { Capability, EvidenceAnchor } from "@scribe-skill/core";
 import { CorpusRevisionConflictError, PdfWorkspace, SourceRevisionConflictError } from "@scribe-skill/pdf-workspace";
-import type { DocumentSection, SearchQuery } from "@scribe-skill/pdf-workspace";
+import type { AnswerInquiryInput, CreateInquiryInput, DocumentSection, SearchQuery } from "@scribe-skill/pdf-workspace";
 
 const insecureDevelopmentToken = "local-development-only";
 
@@ -209,7 +209,7 @@ const server = createServer(async (request, response) => {
     if (origin) response.setHeader("access-control-allow-origin", origin);
     response.setHeader("vary", "Origin");
     response.setHeader("access-control-allow-headers", "content-type,x-scribe-token,idempotency-key");
-    response.setHeader("access-control-allow-methods", "GET,POST,PATCH,PUT,OPTIONS");
+    response.setHeader("access-control-allow-methods", "GET,POST,PATCH,PUT,DELETE,OPTIONS");
     if (request.method === "OPTIONS") return send(response, 204, "", "text/plain");
     if (request.headers["x-scribe-token"] !== token) return send(response, 401, { error: "Unauthorized" });
     const url = new URL(request.url ?? "/", `http://${host}:${requestedPort}`);
@@ -296,6 +296,70 @@ const server = createServer(async (request, response) => {
     if (request.method === "POST" && url.pathname === "/api/search/query") {
       const input = await body(request);
       return send(response, 200, await workspace.searchQuery(input as unknown as SearchQuery));
+    }
+    if (request.method === "GET" && url.pathname === "/api/inquiry/routes") {
+      return send(response, 200, { schemaVersion: "1", routes: workspace.listInquiryRoutes() });
+    }
+    const documentInquiriesMatch = url.pathname.match(/^\/api\/documents\/([^/]+)\/inquiries$/);
+    if (request.method === "GET" && documentInquiriesMatch) {
+      await workspace.verifyDocumentAsset(documentInquiriesMatch[1]!);
+      return send(response, 200, workspace.listInquirySessions(documentInquiriesMatch[1]!));
+    }
+    if (request.method === "POST" && url.pathname === "/api/inquiries") {
+      const input = await body(request);
+      const idempotencyKey = typeof request.headers["idempotency-key"] === "string" ? request.headers["idempotency-key"] : "";
+      return send(
+        response,
+        201,
+        await workspace.createInquirySession(input as unknown as CreateInquiryInput, idempotencyKey),
+      );
+    }
+    const inquiryExportMatch = url.pathname.match(/^\/api\/inquiries\/([^/]+)\/export\.(md|json)$/);
+    if (request.method === "GET" && inquiryExportMatch) {
+      const session = workspace.getInquirySession(inquiryExportMatch[1]!);
+      if (!session) return send(response, 404, { error: "Inquiry not found" });
+      await workspace.verifyDocumentAsset(session.documentId);
+      return inquiryExportMatch[2] === "md"
+        ? send(response, 200, workspace.exportInquiryMarkdown(session.id), "text/markdown; charset=utf-8")
+        : send(response, 200, workspace.exportInquiryJson(session.id));
+    }
+    const inquiryAnswerMatch = url.pathname.match(/^\/api\/inquiries\/([^/]+)\/steps\/([^/]+)\/answer$/);
+    if (request.method === "POST" && inquiryAnswerMatch) {
+      const input = await body(request);
+      const session = workspace.getInquirySession(inquiryAnswerMatch[1]!);
+      if (!session) return send(response, 404, { error: "Inquiry not found" });
+      await workspace.verifyDocumentAsset(session.documentId);
+      return send(
+        response,
+        200,
+        workspace.answerInquiryStep(session.id, inquiryAnswerMatch[2]!, input as unknown as AnswerInquiryInput),
+      );
+    }
+    const inquiryStepMatch = url.pathname.match(/^\/api\/inquiries\/([^/]+)\/steps\/([^/]+)$/);
+    if (request.method === "PATCH" && inquiryStepMatch) {
+      const input = await body(request);
+      const session = workspace.getInquirySession(inquiryStepMatch[1]!);
+      if (!session) return send(response, 404, { error: "Inquiry not found" });
+      await workspace.verifyDocumentAsset(session.documentId);
+      return send(
+        response,
+        200,
+        workspace.editInquiryStep(session.id, inquiryStepMatch[2]!, input as unknown as AnswerInquiryInput),
+      );
+    }
+    const inquiryMatch = url.pathname.match(/^\/api\/inquiries\/([^/]+)$/);
+    if (request.method === "GET" && inquiryMatch) {
+      const session = workspace.getInquirySession(inquiryMatch[1]!);
+      if (!session) return send(response, 404, { error: "Inquiry not found" });
+      await workspace.verifyDocumentAsset(session.documentId);
+      return send(response, 200, session);
+    }
+    if (request.method === "DELETE" && inquiryMatch) {
+      const session = workspace.getInquirySession(inquiryMatch[1]!);
+      if (!session) return send(response, 404, { error: "Inquiry not found" });
+      await workspace.verifyDocumentAsset(session.documentId);
+      workspace.deleteInquirySession(session.id);
+      return send(response, 200, { deleted: true, id: session.id });
     }
     const sectionMatch = url.pathname.match(/^\/api\/sections\/([^/]+)$/);
     const sectionSplitMatch = url.pathname.match(/^\/api\/sections\/([^/]+)\/split$/);

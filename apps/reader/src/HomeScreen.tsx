@@ -31,10 +31,10 @@ const outcomes = [
   },
   {
     number: "04",
-    title: "Next: export a cited skill",
-    description: "A later build will turn the reviewed source into task-routed context, a knowledge graph, and a portable skill.",
-    requirement: "Roadmap",
-    detail: "Today, agents can use the local document and audiobook APIs; skill export is not shipped yet.",
+    title: "Interrogate with citations",
+    description: "Start a branching inquiry, separate book interpretation from personal reflection, and resume or export the reasoning.",
+    requirement: "No key",
+    detail: "Guided sessions and evidence stay in local SQLite unless you export them.",
   },
 ];
 
@@ -125,7 +125,8 @@ export function HomeScreen({ busy, message, pdfPath, onChooseFile, onOpenPath, o
         <ol className="workflow-list">
           <li><span>1</span><div><strong>Inspect</strong><p>See the rendered page and the extracted reading order together. Every editable passage retains its immutable source.</p></div></li>
           <li><span>2</span><div><strong>Listen</strong><p>Preview with a device voice for free, or connect a voice provider to cache higher-quality section audio.</p></div></li>
-          <li><span>3</span><div><strong>Produce</strong><p>Plan before spending, confirm rights and limits, then export independently verifiable audio parts and citations.</p></div></li>
+          <li><span>3</span><div><strong>Inquire</strong><p>Choose an objective, work through cited questions, and decide whether each response is grounded in the book or comes from you.</p></div></li>
+          <li><span>4</span><div><strong>Produce</strong><p>Plan before spending, confirm rights and limits, then export independently verifiable audio parts and citations.</p></div></li>
         </ol>
       </section>
 

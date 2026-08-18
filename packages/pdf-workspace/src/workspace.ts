@@ -21,6 +21,18 @@ import {
   type ProposedSection,
 } from "./corpus.ts";
 import {
+  inquiryRoute,
+  inquiryRoutes,
+  nextInquiryPrompt,
+  type AnswerInquiryInput,
+  type CreateInquiryInput,
+  type InquiryEvidence,
+  type InquiryResponseKind,
+  type InquiryRoute,
+  type InquirySession,
+  type InquiryStep,
+} from "./inquiry.ts";
+import {
   evidenceMatchesVisualFilter,
   ftsSearchExpression,
   matchedSearchTerms,
@@ -255,6 +267,23 @@ function normalizePassage(row: Record<string, unknown>): DocumentPassage {
   };
 }
 
+function normalizeInquiryStep(row: Record<string, unknown>): InquiryStep {
+  return {
+    id: String(row.id),
+    sequence: Number(row.step_sequence),
+    prompt: String(row.prompt),
+    purpose: String(row.purpose),
+    status: String(row.status) as InquiryStep["status"],
+    response: row.response === null ? undefined : String(row.response),
+    responseKind: row.response_kind === null ? undefined : String(row.response_kind) as InquiryResponseKind,
+    evidencePassageIds: JSON.parse(String(row.evidence_passage_ids_json)) as string[],
+    nextMove: row.next_move === null ? undefined : String(row.next_move) as InquiryStep["nextMove"],
+    createdAt: String(row.created_at),
+    answeredAt: row.answered_at === null ? undefined : String(row.answered_at),
+    updatedAt: row.updated_at === null ? undefined : String(row.updated_at),
+  };
+}
+
 function normalizeEvidenceAnchor(row: Record<string, unknown>): EvidenceAnchor {
   const block = normalizeBlock(row);
   return {
@@ -305,7 +334,7 @@ export class PdfWorkspace {
 
   private migrate(): void {
     const version = Number(this.database.prepare("PRAGMA user_version").get()?.user_version ?? 0);
-    if (version > 6) throw new Error(`Workspace schema ${version} is newer than this app supports`);
+    if (version > 7) throw new Error(`Workspace schema ${version} is newer than this app supports`);
     if (version === 0) {
       this.database.exec(`
         BEGIN;
@@ -422,7 +451,40 @@ export class PdfWorkspace {
           content TEXT NOT NULL,
           created_at TEXT NOT NULL
         );
-        PRAGMA user_version = 6;
+        CREATE TABLE inquiry_sessions (
+          id TEXT PRIMARY KEY,
+          document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+          document_hash TEXT NOT NULL,
+          corpus_revision INTEGER NOT NULL,
+          route_json TEXT NOT NULL,
+          objective TEXT NOT NULL,
+          title TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (status IN ('active', 'completed')),
+          evidence_json TEXT NOT NULL,
+          idempotency_key TEXT NOT NULL UNIQUE,
+          request_hash TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          completed_at TEXT
+        );
+        CREATE INDEX inquiry_sessions_document_updated ON inquiry_sessions(document_id, updated_at DESC);
+        CREATE TABLE inquiry_steps (
+          id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL REFERENCES inquiry_sessions(id) ON DELETE CASCADE,
+          step_sequence INTEGER NOT NULL,
+          prompt TEXT NOT NULL,
+          purpose TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (status IN ('pending', 'answered')),
+          response TEXT,
+          response_kind TEXT CHECK (response_kind IN ('grounded-interpretation', 'personal-reflection')),
+          evidence_passage_ids_json TEXT NOT NULL DEFAULT '[]',
+          next_move TEXT,
+          created_at TEXT NOT NULL,
+          answered_at TEXT,
+          updated_at TEXT,
+          UNIQUE(session_id, step_sequence)
+        );
+        PRAGMA user_version = 7;
         COMMIT;
       `);
     }
@@ -529,6 +591,46 @@ export class PdfWorkspace {
         INSERT INTO passage_search (passage_id, document_id, section_id, source_text)
         SELECT id, document_id, section_id, source_text FROM passages WHERE status = 'current';
         PRAGMA user_version = 6;
+        COMMIT;
+      `);
+    }
+    if (version > 0 && version < 7) {
+      this.database.exec(`
+        BEGIN;
+        CREATE TABLE inquiry_sessions (
+          id TEXT PRIMARY KEY,
+          document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+          document_hash TEXT NOT NULL,
+          corpus_revision INTEGER NOT NULL,
+          route_json TEXT NOT NULL,
+          objective TEXT NOT NULL,
+          title TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (status IN ('active', 'completed')),
+          evidence_json TEXT NOT NULL,
+          idempotency_key TEXT NOT NULL UNIQUE,
+          request_hash TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          completed_at TEXT
+        );
+        CREATE INDEX inquiry_sessions_document_updated ON inquiry_sessions(document_id, updated_at DESC);
+        CREATE TABLE inquiry_steps (
+          id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL REFERENCES inquiry_sessions(id) ON DELETE CASCADE,
+          step_sequence INTEGER NOT NULL,
+          prompt TEXT NOT NULL,
+          purpose TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (status IN ('pending', 'answered')),
+          response TEXT,
+          response_kind TEXT CHECK (response_kind IN ('grounded-interpretation', 'personal-reflection')),
+          evidence_passage_ids_json TEXT NOT NULL DEFAULT '[]',
+          next_move TEXT,
+          created_at TEXT NOT NULL,
+          answered_at TEXT,
+          updated_at TEXT,
+          UNIQUE(session_id, step_sequence)
+        );
+        PRAGMA user_version = 7;
         COMMIT;
       `);
     }
@@ -1534,6 +1636,315 @@ export class PdfWorkspace {
       },
       results,
     };
+  }
+
+  listInquiryRoutes(): InquiryRoute[] {
+    return inquiryRoutes.map((route) => ({ ...route, suggestedMoves: [...route.suggestedMoves] }));
+  }
+
+  private inquiryStaleness(
+    row: Record<string, unknown>,
+    evidence: InquiryEvidence[],
+  ): { stale: boolean; staleReason?: string } {
+    const document = this.getDocument(String(row.document_id));
+    if (!document) return { stale: true, staleReason: "The source document is no longer available." };
+    if (document.documentHash !== String(row.document_hash)) {
+      return { stale: true, staleReason: "The source document hash changed after this inquiry was created." };
+    }
+    if (document.corpusRevision !== Number(row.corpus_revision)) {
+      return { stale: true, staleReason: "The reviewed chapter map changed after this inquiry was created." };
+    }
+    const currentPassages = new Map(this.listPassages(document.id).map((passage) => [passage.id, passage]));
+    if (evidence.some(({ passageId, contentHash }) => currentPassages.get(passageId)?.contentHash !== contentHash)) {
+      return { stale: true, staleReason: "One or more cited passages changed after this inquiry was created." };
+    }
+    return { stale: false };
+  }
+
+  getInquirySession(sessionId: string): InquirySession | undefined {
+    const row = this.database.prepare("SELECT * FROM inquiry_sessions WHERE id = ?").get(sessionId);
+    if (!row) return undefined;
+    const evidence = JSON.parse(String(row.evidence_json)) as InquiryEvidence[];
+    const steps = this.database
+      .prepare("SELECT * FROM inquiry_steps WHERE session_id = ? ORDER BY step_sequence")
+      .all(sessionId)
+      .map(normalizeInquiryStep);
+    const staleness = this.inquiryStaleness(row, evidence);
+    return {
+      schemaVersion: "1",
+      id: String(row.id),
+      documentId: String(row.document_id),
+      documentHash: String(row.document_hash),
+      corpusRevision: Number(row.corpus_revision),
+      route: JSON.parse(String(row.route_json)) as InquiryRoute,
+      objective: String(row.objective),
+      title: String(row.title),
+      status: String(row.status) as InquirySession["status"],
+      ...staleness,
+      evidence,
+      steps,
+      currentStepId: steps.find(({ status }) => status === "pending")?.id,
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+      completedAt: row.completed_at === null ? undefined : String(row.completed_at),
+    };
+  }
+
+  listInquirySessions(documentId: string): InquirySession[] {
+    const document = this.getDocument(documentId);
+    if (!document) throw new Error(`Unknown document: ${documentId}`);
+    return this.database
+      .prepare("SELECT id FROM inquiry_sessions WHERE document_id = ? ORDER BY updated_at DESC, id")
+      .all(documentId)
+      .map(({ id }) => this.getInquirySession(String(id))!);
+  }
+
+  async createInquirySession(input: CreateInquiryInput, idempotencyKey: string): Promise<InquirySession> {
+    if (!idempotencyKey.trim() || idempotencyKey.length > 200) {
+      throw new Error("An idempotency key of at most 200 characters is required");
+    }
+    if (!input || typeof input !== "object" || typeof input.documentId !== "string") {
+      throw new Error("A documentId is required");
+    }
+    const document = this.getDocument(input.documentId);
+    if (!document) throw new Error(`Unknown document: ${input.documentId}`);
+    await this.verifyDocumentAsset(document.id);
+    const route = inquiryRoute(input.routeId);
+    if (!route) throw new Error("Inquiry route must be understand, challenge, apply, or reflect");
+    const objective = typeof input.objective === "string" ? input.objective.trim() : "";
+    if (objective.length < 3 || objective.length > 500) {
+      throw new Error("Inquiry objective must be from 3 to 500 characters");
+    }
+    const title = typeof input.title === "string" && input.title.trim() ? input.title.trim() : objective.slice(0, 100);
+    if (title.length > 120) throw new Error("Inquiry title must be at most 120 characters");
+    const maxEvidenceCharacters = input.maxEvidenceCharacters ?? 6_000;
+    if (!Number.isSafeInteger(maxEvidenceCharacters) || maxEvidenceCharacters < 512 || maxEvidenceCharacters > 12_000) {
+      throw new Error("Inquiry evidence budget must be an integer from 512 to 12,000 characters");
+    }
+    const requestHash = sha256(JSON.stringify({
+      documentId: document.id,
+      documentHash: document.documentHash,
+      corpusRevision: document.corpusRevision,
+      routeId: route.id,
+      objective,
+      title,
+      maxEvidenceCharacters,
+    }));
+    const replay = this.database.prepare("SELECT id, request_hash FROM inquiry_sessions WHERE idempotency_key = ?").get(idempotencyKey);
+    if (replay) {
+      if (String(replay.request_hash) !== requestHash) throw new Error("Idempotency key was already used for a different inquiry request");
+      return this.getInquirySession(String(replay.id))!;
+    }
+
+    const search = await this.searchQuery({
+      documentId: document.id,
+      query: objective,
+      sourceRevision: {
+        documentHash: document.documentHash,
+        corpusRevision: document.corpusRevision,
+        extractionRevision: document.extractionRevision,
+      },
+      filters: { reviewStates: ["accepted"] },
+      limit: 4,
+      contextBudget: { maxCharacters: maxEvidenceCharacters },
+    });
+    if (search.outcome !== "matches" || search.results.length === 0) {
+      throw new Error("No accepted source passage supports this inquiry yet; revise the objective or review more chapter boundaries");
+    }
+    const evidence: InquiryEvidence[] = search.results.map((result) => ({
+      passageId: result.passage.id,
+      sectionId: result.section.id,
+      sectionTitle: result.section.title,
+      pages: result.passage.pages,
+      contentHash: result.passage.contentHash,
+      preferredEvidenceId: result.preferredEvidenceId,
+      evidence: result.evidence,
+      snippet: result.snippet,
+    }));
+    const createdAt = new Date().toISOString();
+    const id = `inq-${sha256(`${document.id}\0${idempotencyKey}`).slice("sha256:".length, "sha256:".length + 20)}`;
+    const stepId = `${id}-step-1`;
+    this.database.exec("BEGIN");
+    try {
+      this.database
+        .prepare(
+          `INSERT INTO inquiry_sessions
+           (id, document_id, document_hash, corpus_revision, route_json, objective, title, status,
+            evidence_json, idempotency_key, request_hash, created_at, updated_at, completed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, NULL)`,
+        )
+        .run(
+          id,
+          document.id,
+          document.documentHash,
+          document.corpusRevision,
+          JSON.stringify(route),
+          objective,
+          title,
+          JSON.stringify(evidence),
+          idempotencyKey,
+          requestHash,
+          createdAt,
+          createdAt,
+        );
+      this.database
+        .prepare(
+          `INSERT INTO inquiry_steps
+           (id, session_id, step_sequence, prompt, purpose, status, response, response_kind,
+            evidence_passage_ids_json, next_move, created_at, answered_at, updated_at)
+           VALUES (?, ?, 1, ?, ?, 'pending', NULL, NULL, '[]', NULL, ?, NULL, NULL)`,
+        )
+        .run(stepId, id, route.openingPrompt, "Establish a source-grounded starting point.", createdAt);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+    return this.getInquirySession(id)!;
+  }
+
+  answerInquiryStep(sessionId: string, stepId: string, input: AnswerInquiryInput): InquirySession {
+    const session = this.getInquirySession(sessionId);
+    if (!session) throw new Error(`Unknown inquiry: ${sessionId}`);
+    if (session.status !== "active") throw new Error("This inquiry is already complete");
+    if (session.stale) throw new SourceRevisionConflictError(session.documentId, session.staleReason ?? "Inquiry evidence is stale");
+    if (session.currentStepId !== stepId) throw new Error("Only the current pending inquiry step can advance the session");
+    const response = typeof input.response === "string" ? input.response.trim() : "";
+    if (!response || response.length > 20_000) throw new Error("Inquiry response must be from 1 to 20,000 characters");
+    if (input.responseKind !== "grounded-interpretation" && input.responseKind !== "personal-reflection") {
+      throw new Error("Response kind must distinguish grounded interpretation from personal reflection");
+    }
+    const evidencePassageIds = [...new Set(input.evidencePassageIds ?? [])];
+    const allowedEvidence = new Set(session.evidence.map(({ passageId }) => passageId));
+    if (evidencePassageIds.some((id) => !allowedEvidence.has(id))) throw new Error("Every cited passage must belong to this inquiry");
+    if (input.responseKind === "grounded-interpretation" && evidencePassageIds.length === 0) {
+      throw new Error("A grounded interpretation must cite at least one selected passage");
+    }
+    if (!(["deepen", "challenge", "connect", "apply", "synthesize", "complete"] as const).includes(input.nextMove)) {
+      throw new Error("Choose a valid next inquiry move");
+    }
+    if (session.steps.length >= 8 && input.nextMove !== "complete") {
+      throw new Error("This bounded inquiry has reached eight steps; complete it or start a new session");
+    }
+    const answeredAt = new Date().toISOString();
+    this.database.exec("BEGIN");
+    try {
+      this.database
+        .prepare(
+          `UPDATE inquiry_steps SET status = 'answered', response = ?, response_kind = ?,
+           evidence_passage_ids_json = ?, next_move = ?, answered_at = ?, updated_at = ?
+           WHERE id = ? AND session_id = ?`,
+        )
+        .run(response, input.responseKind, JSON.stringify(evidencePassageIds), input.nextMove, answeredAt, answeredAt, stepId, sessionId);
+      if (input.nextMove === "complete") {
+        this.database
+          .prepare("UPDATE inquiry_sessions SET status = 'completed', updated_at = ?, completed_at = ? WHERE id = ?")
+          .run(answeredAt, answeredAt, sessionId);
+      } else {
+        const next = nextInquiryPrompt(input.nextMove, session.objective);
+        const sequence = session.steps.length + 1;
+        this.database
+          .prepare(
+            `INSERT INTO inquiry_steps
+             (id, session_id, step_sequence, prompt, purpose, status, response, response_kind,
+              evidence_passage_ids_json, next_move, created_at, answered_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, 'pending', NULL, NULL, '[]', NULL, ?, NULL, NULL)`,
+          )
+          .run(`${sessionId}-step-${sequence}`, sessionId, sequence, next.prompt, next.purpose, answeredAt);
+        this.database.prepare("UPDATE inquiry_sessions SET updated_at = ? WHERE id = ?").run(answeredAt, sessionId);
+      }
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+    return this.getInquirySession(sessionId)!;
+  }
+
+  editInquiryStep(
+    sessionId: string,
+    stepId: string,
+    input: Pick<AnswerInquiryInput, "response" | "responseKind" | "evidencePassageIds">,
+  ): InquirySession {
+    const session = this.getInquirySession(sessionId);
+    if (!session) throw new Error(`Unknown inquiry: ${sessionId}`);
+    const step = session.steps.find(({ id }) => id === stepId);
+    if (!step || step.status !== "answered") throw new Error("Only an answered inquiry step can be edited");
+    const response = typeof input.response === "string" ? input.response.trim() : "";
+    if (!response || response.length > 20_000) throw new Error("Inquiry response must be from 1 to 20,000 characters");
+    if (input.responseKind !== "grounded-interpretation" && input.responseKind !== "personal-reflection") {
+      throw new Error("Response kind must distinguish grounded interpretation from personal reflection");
+    }
+    const evidencePassageIds = [...new Set(input.evidencePassageIds ?? [])];
+    const allowedEvidence = new Set(session.evidence.map(({ passageId }) => passageId));
+    if (evidencePassageIds.some((id) => !allowedEvidence.has(id))) throw new Error("Every cited passage must belong to this inquiry");
+    if (input.responseKind === "grounded-interpretation" && evidencePassageIds.length === 0) {
+      throw new Error("A grounded interpretation must cite at least one selected passage");
+    }
+    const updatedAt = new Date().toISOString();
+    this.database
+      .prepare(
+        `UPDATE inquiry_steps SET response = ?, response_kind = ?, evidence_passage_ids_json = ?, updated_at = ?
+         WHERE id = ? AND session_id = ?`,
+      )
+      .run(response, input.responseKind, JSON.stringify(evidencePassageIds), updatedAt, stepId, sessionId);
+    this.database.prepare("UPDATE inquiry_sessions SET updated_at = ? WHERE id = ?").run(updatedAt, sessionId);
+    return this.getInquirySession(sessionId)!;
+  }
+
+  deleteInquirySession(sessionId: string): boolean {
+    return Number(this.database.prepare("DELETE FROM inquiry_sessions WHERE id = ?").run(sessionId).changes) > 0;
+  }
+
+  exportInquiryJson(sessionId: string): InquirySession {
+    const session = this.getInquirySession(sessionId);
+    if (!session) throw new Error(`Unknown inquiry: ${sessionId}`);
+    return session;
+  }
+
+  exportInquiryMarkdown(sessionId: string): string {
+    const session = this.getInquirySession(sessionId);
+    if (!session) throw new Error(`Unknown inquiry: ${sessionId}`);
+    const lines = [
+      `# ${session.title}`,
+      "",
+      `Objective: ${session.objective}`,
+      `Route: ${session.route.title} (v${session.route.version})`,
+      `Source: ${session.documentHash} · corpus revision ${session.corpusRevision}`,
+      `Status: ${session.status}${session.stale ? ` · STALE — ${session.staleReason}` : " · current"}`,
+      "",
+      "## Cited source context",
+      "",
+    ];
+    for (const evidence of session.evidence) {
+      lines.push(
+        `- ${evidence.sectionTitle}, pp. ${evidence.pages[0]}–${evidence.pages[1]} — passage \`${evidence.passageId}\``,
+        `  - ${evidence.contentHash}`,
+        `  - anchors: ${evidence.evidence.map(({ id }) => id).join(", ")}`,
+      );
+    }
+    lines.push("", "## Inquiry", "");
+    for (const step of session.steps) {
+      lines.push(`### ${step.sequence}. ${step.purpose}`, "", step.prompt, "");
+      if (step.response) {
+        const citedEvidence = step.evidencePassageIds
+          .map((passageId) => session.evidence.find((item) => item.passageId === passageId))
+          .filter((item): item is InquiryEvidence => Boolean(item));
+        lines.push(
+          `**${step.responseKind === "grounded-interpretation" ? "Grounded interpretation" : "Personal reflection"}**`,
+          "",
+          step.response,
+          "",
+          `Evidence passages: ${step.evidencePassageIds.length ? step.evidencePassageIds.map((id) => `\`${id}\``).join(", ") : "none — user-authored reflection"}`,
+          ...(citedEvidence.length ? [`Preferred source anchors: ${citedEvidence.map(({ preferredEvidenceId }) => `\`${preferredEvidenceId}\``).join(", ")}`] : []),
+          "",
+        );
+      } else {
+        lines.push("_Pending._", "");
+      }
+    }
+    lines.push("---", "", "Book text is untrusted source material. Interpretations and reflections are derived or user-authored; verify citations before reuse.", "");
+    return lines.join("\n");
   }
 
   corpusSummary(documentId: string): CorpusSummary {
