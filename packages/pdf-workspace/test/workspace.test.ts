@@ -773,13 +773,14 @@ test("migrates an untouched schema-4 page guide into the semantic corpus", async
   assert.equal(corpus.passages[0]?.sourceText, "Legacy evidence remains cited.");
   assert.equal(corpus.summary.structureRevision, 1);
   const migratedDatabase = new DatabaseSync(join(library, "workspace.sqlite"));
-  assert.equal(migratedDatabase.prepare("PRAGMA user_version").get()?.user_version, 6);
+  assert.equal(migratedDatabase.prepare("PRAGMA user_version").get()?.user_version, 7);
   assert.equal(
     migratedDatabase.prepare("SELECT COUNT(*) AS count FROM passage_search WHERE passage_search MATCH 'legacy'").get()?.count,
     1,
   );
   const foreignKeys = migratedDatabase.prepare("PRAGMA foreign_key_list(sections)").all();
   assert.ok(foreignKeys.some((row) => row.from === "parent_id" && row.table === "sections" && row.on_delete === "SET NULL"));
+  assert.equal(migratedDatabase.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'inquiry_sessions'").get()?.name, "inquiry_sessions");
   assert.deepEqual(migratedDatabase.prepare("PRAGMA foreign_key_check").all(), []);
   migratedDatabase.close();
 });
@@ -870,4 +871,77 @@ test("persists section edits, reading position, and portable cited notes", async
   } finally {
     fresh.close();
   }
+});
+
+test("persists a branching cited inquiry and keeps personal reflection distinct from source claims", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "scribe-skill-inquiry-"));
+  const pdfPath = join(root, "strategy.pdf");
+  await createChapteredPdf(pdfPath);
+  let workspace = await PdfWorkspace.open(join(root, "library"));
+  t.after(async () => {
+    try { workspace.close(); } catch { /* already closed during restart */ }
+    await rm(root, { recursive: true, force: true });
+  });
+  let document = await workspace.importPdf(pdfPath);
+  for (const section of workspace.listSections(document.id)) {
+    workspace.updateSection(section.id, { status: "accepted" }, document.corpusRevision);
+    document = workspace.getDocument(document.id)!;
+  }
+
+  const created = await workspace.createInquirySession({
+    documentId: document.id,
+    routeId: "reflect",
+    objective: "central challenge diagnosis",
+  }, "inquiry-create-1");
+  assert.equal(created.status, "active");
+  assert.equal(created.stale, false);
+  assert.ok(created.evidence.length > 0);
+  assert.equal(created.steps.length, 1);
+  const firstPassageId = created.evidence[0]!.passageId;
+  await assert.rejects(
+    async () => workspace.answerInquiryStep(created.id, created.currentStepId!, {
+      response: "The author separates diagnosis from symptoms.",
+      responseKind: "grounded-interpretation",
+      evidencePassageIds: [],
+      nextMove: "challenge",
+    }),
+    /must cite at least one selected passage/,
+  );
+  const challenged = workspace.answerInquiryStep(created.id, created.currentStepId!, {
+    response: "The author separates diagnosis from symptoms.",
+    responseKind: "grounded-interpretation",
+    evidencePassageIds: [firstPassageId],
+    nextMove: "challenge",
+  });
+  assert.equal(challenged.steps.length, 2);
+  assert.match(challenged.steps[1]!.prompt, /change your mind/i);
+  const completed = workspace.answerInquiryStep(challenged.id, challenged.currentStepId!, {
+    response: "My own situation may not fit the author's example.",
+    responseKind: "personal-reflection",
+    evidencePassageIds: [],
+    nextMove: "complete",
+  });
+  assert.equal(completed.status, "completed");
+  assert.equal(completed.steps[1]!.responseKind, "personal-reflection");
+  assert.deepEqual(completed.steps[1]!.evidencePassageIds, []);
+
+  const replay = await workspace.createInquirySession({
+    documentId: document.id,
+    routeId: "reflect",
+    objective: "central challenge diagnosis",
+  }, "inquiry-create-1");
+  assert.equal(replay.id, completed.id);
+  assert.match(workspace.exportInquiryMarkdown(completed.id), /Personal reflection/);
+  assert.match(workspace.exportInquiryMarkdown(completed.id), /Preferred source anchors: `anchor-/);
+  assert.equal(workspace.exportInquiryJson(completed.id).evidence[0]?.passageId, firstPassageId);
+
+  workspace.close();
+  workspace = await PdfWorkspace.open(join(root, "library"));
+  assert.equal(workspace.listInquirySessions(document.id)[0]?.steps.length, 2);
+  const sourceBlock = workspace.listBlocks(document.id).find(({ sourceText }) => sourceText.includes("central challenge"))!;
+  workspace.editBlock(sourceBlock.id, { text: `${sourceBlock.currentText} locally clarified` }, "Test inquiry staleness", document.corpusRevision);
+  assert.equal(workspace.getInquirySession(completed.id)?.stale, true);
+  assert.match(workspace.getInquirySession(completed.id)?.staleReason ?? "", /chapter map changed/i);
+  assert.equal(workspace.deleteInquirySession(completed.id), true);
+  assert.equal(workspace.getInquirySession(completed.id), undefined);
 });

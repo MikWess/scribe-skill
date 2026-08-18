@@ -17,7 +17,7 @@ The exported skill is a navigation guide, not a static summary. Given a task, it
 
 ## Status
 
-Early implementation. The evidence/navigation foundation, deterministic local PDF workspace, accessible reader, and cited audiobook production are merged. The current stacked slices add a versioned semantic corpus and local cited retrieval: detected chapter proposals, stable source passages, exact page-region evidence, local review controls, and explicit OCR blockers. Read the [PRD](docs/PRD.md), [next 10 PR roadmap](docs/next-10-prs.md), [semantic corpus decision](docs/adr/0006-semantic-corpus.md), [retrieval decision](docs/adr/0007-local-cited-retrieval.md), and [70+ source market research](docs/market-research.md).
+Early implementation. The evidence/navigation foundation, deterministic local PDF workspace, accessible reader, and cited audiobook production are merged. The current stacked slices add a versioned semantic corpus, local cited retrieval, and resumable guided inquiry: detected chapter proposals, stable source passages, exact page-region evidence, branching reflection routes, local review controls, and explicit OCR blockers. Read the [PRD](docs/PRD.md), [next 10 PR roadmap](docs/next-10-prs.md), [semantic corpus decision](docs/adr/0006-semantic-corpus.md), [retrieval decision](docs/adr/0007-local-cited-retrieval.md), [guided inquiry decision](docs/adr/0008-guided-inquiry.md), and [70+ source market research](docs/market-research.md).
 
 ## Developer quick start
 
@@ -53,6 +53,22 @@ Local cited retrieval needs no provider, API key, embedding service, or network 
 ```
 
 The response outcome is `matches`, `no-match`, or `budget-exhausted`. Source text is labeled untrusted data; snippets and scores are labeled derived. An agent should use `preferredEvidenceId` for the best matching block or inspect the complete `evidence` array before making a claim.
+
+Guided inquiry also needs no provider or API key. The reader's **Inquire** workspace and the local API use the same persisted session contract. Start with `GET /api/inquiry/routes`, then `POST /api/inquiries` with an `Idempotency-Key`, `documentId`, `routeId`, and objective. ScribeSkill retrieves a bounded set of accepted passages and presents one prompt at a time. Each response is explicitly either a `grounded-interpretation`, which must cite at least one selected passage, or a `personal-reflection`, which is preserved as user-authored writing rather than attributed to the book.
+
+Advance with `POST /api/inquiries/:id/steps/:stepId/answer` and one of `deepen`, `challenge`, `connect`, `apply`, `synthesize`, or `complete`. Sessions survive restart, are bounded to eight steps, become visibly stale when the reviewed corpus changes, and support inspect, edit, Markdown/evidence-JSON export, and permanent deletion. Book passages, prompts, and answers stay in local SQLite unless the user deliberately exports them.
+
+Creation pins the current document hash and reviewed corpus revision on the server; callers do not supply a revision. A minimal agent request is:
+
+```sh
+curl -X POST "$SCRIBE_SKILL_URL/api/inquiries" \
+  -H "x-scribe-token: $SCRIBE_SKILL_TOKEN" \
+  -H "content-type: application/json" \
+  -H "idempotency-key: book-question-1" \
+  -d '{"documentId":"doc-...","routeId":"understand","objective":"What is the central claim?"}'
+```
+
+Read or resume with `GET /api/inquiries/:id`; edit an answered step with `PATCH /api/inquiries/:id/steps/:stepId` and `{ "response", "responseKind", "evidencePassageIds" }`. The returned session includes the current step, frozen passage context, exact source anchors, provenance labels, and stale status.
 
 The reader command starts the loopback-only local service and browser UI at `http://localhost:5173`. It uses an explicitly enabled development token; direct service use requires `SCRIBE_SKILL_TOKEN`. The Electron desktop host starts the same service itself on a random port with an ephemeral token, so `pnpm --filter @scribe-skill/reader desktop:dev` needs no separate server process. Build an unpacked desktop app for the current platform with `pnpm --filter @scribe-skill/reader desktop:build`.
 

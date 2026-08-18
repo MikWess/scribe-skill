@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent a
 import { NarrationPanel } from "./NarrationPanel.js";
 import { AudiobookPanel } from "./AudiobookPanel.js";
 import { HomeScreen } from "./HomeScreen.js";
+import { InquiryPanel } from "./InquiryPanel.js";
 
 declare global {
   interface Window {
@@ -19,8 +20,8 @@ declare global {
 const API = window.scribeRuntime?.api ?? import.meta.env.VITE_SCRIBE_SKILL_API ?? "http://127.0.0.1:4317";
 const TOKEN = window.scribeRuntime?.token ?? import.meta.env.VITE_SCRIBE_SKILL_TOKEN ?? "local-development-only";
 const LAST_DOCUMENT_KEY = "scribe-skill:last-document";
-type WorkspaceView = "inspect" | "search" | "listen" | "produce";
-const WORKSPACE_VIEWS: WorkspaceView[] = ["inspect", "search", "listen", "produce"];
+type WorkspaceView = "inspect" | "search" | "inquire" | "listen" | "produce";
+const WORKSPACE_VIEWS: WorkspaceView[] = ["inspect", "search", "inquire", "listen", "produce"];
 
 interface DocumentRecord {
   id: string;
@@ -584,6 +585,22 @@ export function App() {
     }
   }
 
+  async function downloadArtifact(path: string, filename: string) {
+    const response = await fetch(`${API}${path}`, { headers: { "x-scribe-token": TOKEN } });
+    if (!response.ok) {
+      const failure = (await response.json().catch(() => ({ error: response.statusText }))) as { error: string };
+      throw new Error(failure.error);
+    }
+    const url = URL.createObjectURL(await response.blob());
+    const link = window.document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    window.document.body.append(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+  }
+
   async function fetchAudioArtifact(jobId: string): Promise<string> {
     const response = await fetch(`${API}/api/audio/jobs/${jobId}/artifact`, { headers: { "x-scribe-token": TOKEN } });
     if (!response.ok) throw new Error("Audio artifact is not ready");
@@ -783,8 +800,9 @@ export function App() {
             {([
               ["inspect", "01", "Inspect", "Select, repair, note"],
               ["search", "02", "Find", "Search cited source"],
-              ["listen", "03", "Listen", "Read along or cache"],
-              ["produce", "04", "Produce", "Plan and export"],
+              ["inquire", "03", "Inquire", "Think with evidence"],
+              ["listen", "04", "Listen", "Read along or cache"],
+              ["produce", "05", "Produce", "Plan and export"],
             ] as const).map(([view, number, label, detail], index) => (
               <button
                 key={view}
@@ -976,6 +994,22 @@ export function App() {
                 </details>
               </article>)}
             </div>}
+          </div>}
+
+          {workspaceView === "inquire" && <div id="workspace-panel-inquire" role="tabpanel" aria-labelledby="workspace-tab-inquire" className="workspace-panel inquiry-panel">
+            <div className="workspace-explainer inquiry-explainer"><span>GUIDED INQUIRY · NO KEY</span><h2>Think with the book.</h2><p>Follow a branching line of inquiry, cite any interpretation of the author, and keep personal reflection visibly separate. Sessions resume from local SQLite and export for another human or agent.</p></div>
+            <InquiryPanel
+              documentId={document.id}
+              documentName={document.originalName}
+              requestJson={request}
+              downloadArtifact={downloadArtifact}
+              openEvidence={async (evidence, anchor) => {
+                setSelectedSectionId(evidence.sectionId);
+                await loadPage(document.id, anchor.page, anchor.blockId);
+                setWorkspaceView("inspect");
+                setMessage(`Opened inquiry evidence on page ${anchor.page}`);
+              }}
+            />
           </div>}
 
           {workspaceView === "listen" && activeNarrationSection && <div id="workspace-panel-listen" role="tabpanel" aria-labelledby="workspace-tab-listen" className="workspace-panel">
