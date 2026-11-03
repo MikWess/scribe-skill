@@ -112,6 +112,7 @@ export function App() {
       try {
         const next = await request<Inspection>(`/api/documents/${documentId}/pages/${page}`);
         const imageResponse = await fetch(`${API}${next.renderUrl}`, { headers: { "x-scribe-token": TOKEN } });
+        if (!imageResponse.ok) throw new Error(`Page image could not load (${imageResponse.status}). Try again.`);
         const imageBlob = await imageResponse.blob();
         const imageUrl = URL.createObjectURL(imageBlob);
         setRenderSource((current) => {
@@ -122,6 +123,8 @@ export function App() {
         setPageNumber(page);
         setSelectedId(preferredBlock ?? next.blocks.find(({ status }) => status === "included")?.id);
         setMessage(qualityLabel(next.page.quality));
+      } catch (error) {
+        setMessage(error instanceof Error ? error.message : "Page could not load. Try again.");
       } finally {
         setBusy(false);
       }

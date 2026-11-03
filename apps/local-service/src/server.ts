@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   AudioWorkspace,
@@ -16,6 +16,8 @@ import type { CreateAudiobookPlanInput, ProductionChunk } from "@scribe-skill/au
 import { getCodexCapability, sha256 } from "@scribe-skill/core";
 import type { Capability, EvidenceAnchor } from "@scribe-skill/core";
 import { PdfWorkspace } from "@scribe-skill/pdf-workspace";
+
+import { readerOrigins } from "./origins.ts";
 
 const insecureDevelopmentToken = "local-development-only";
 
@@ -571,11 +573,8 @@ async function runFromCommandLine(): Promise<void> {
     host: "127.0.0.1",
     port: Number(process.env.SCRIBE_SKILL_PORT ?? 4317),
     token,
-    workspacePath: process.env.SCRIBE_SKILL_WORKSPACE ?? "work/dev-library",
-    allowedOrigins: (process.env.SCRIBE_SKILL_ALLOWED_ORIGINS ?? "http://localhost:5173,http://127.0.0.1:5173")
-      .split(",")
-      .map((origin) => origin.trim())
-      .filter(Boolean),
+    workspacePath: process.env.SCRIBE_SKILL_WORKSPACE ?? fileURLToPath(new URL("../../../work/dev-library/", import.meta.url)),
+    allowedOrigins: readerOrigins(process.env),
   });
   process.stdout.write(`ScribeSkill local service: ${handle.url}\n`);
 
