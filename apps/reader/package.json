@@ -9,7 +9,7 @@
   "main": "dist-electron/main.mjs",
   "scripts": {
     "dev": "vite",
-    "dev:stack": "concurrently -k \"SCRIBE_SKILL_ALLOW_INSECURE_DEV_TOKEN=1 SCRIBE_SKILL_PORT=${SCRIBE_SKILL_PORT:-4317} pnpm --dir ../.. dev:service\" \"VITE_SCRIBE_SKILL_API=http://127.0.0.1:${SCRIBE_SKILL_PORT:-4317} vite --port ${SCRIBE_SKILL_UI_PORT:-5173}\"",
+    "dev:stack": "concurrently -k \"SCRIBE_SKILL_ALLOW_INSECURE_DEV_TOKEN=1 SCRIBE_SKILL_PORT=${SCRIBE_SKILL_PORT:-4317} pnpm --dir ../.. dev:service\" \"VITE_SCRIBE_SKILL_API=http://127.0.0.1:${SCRIBE_SKILL_PORT:-4317} vite --host 127.0.0.1 --strictPort --port ${SCRIBE_SKILL_UI_PORT:-5173}\"",
     "build:desktop-main": "esbuild electron/main.ts --bundle --platform=node --format=esm --outfile=dist-electron/main.mjs --external:electron --external:@napi-rs/canvas && esbuild electron/preload.ts --bundle --platform=node --format=cjs --outfile=dist-electron/preload.cjs --external:electron && cp ../../packages/pdf-workspace/node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs dist-electron/pdf.worker.mjs",
     "desktop:dev": "pnpm build && pnpm build:desktop-main && electron .",
     "desktop:build": "pnpm build && pnpm build:desktop-main && electron-builder --dir",
@@ -35,9 +35,23 @@
     "appId": "app.scribeskill.reader",
     "productName": "ScribeSkill",
     "asar": true,
-    "asarUnpack": ["node_modules/@napi-rs/**/*"],
-    "directories": { "output": "release" },
-    "files": ["dist/**/*", "dist-electron/**/*", "package.json"],
-    "mac": { "category": "public.app-category.productivity", "target": ["dir"], "icon": "build/icon.icns" }
+    "asarUnpack": [
+      "node_modules/@napi-rs/**/*"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [
+        "dir"
+      ],
+      "icon": "build/icon.icns"
+    }
   }
 }

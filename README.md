@@ -1,19 +1,14 @@
 # ScribeSkill
 
-Turn permitted PDFs into inspectable, cited skills for humans and AI agents. Read along with synchronized highlighting, create audio or a captioned MP4 companion incrementally, ask grounded questions through your own AI provider, and preserve optional insights locally in SQLite.
+A local PDF reader and evidence workspace. Inspect extracted text beside rendered pages, save cited notes, listen to section scripts, and build cited audio packages with your own provider keys.
 
-## Why it exists
+## Three useful workflows
 
-Books are rich source material, but today their reading, listening, retrieval, and agent-use workflows are fragmented. ScribeSkill puts them in one inspectable local workspace:
+1. **Read a paper and keep traceable notes.** Import a digital PDF, inspect its page blocks and reading order, then save notes attached to source evidence. Export Markdown plus evidence JSON so you can return to the exact passage. Image-only pages are flagged `ocr-required`; OCR is not implemented.
+2. **Listen to a section while following its text.** Select a section, open the narration studio, and preview with device voices without a key. Optional OpenAI/ElevenLabs synthesis uses your own credentials and requires approval before provider egress. Device speech and provider audio have different timing capabilities; OpenAI output has no synchronized word timestamps.
+3. **Plan a cited audiobook before spending on synthesis.** Open **Cited audiobook**, select the current section or section guide, and dry-run the plan. Review extraction blockers, part counts, characters, rights, and your cost estimate. Confirm the immutable plan before production, review QC warnings, then export the audio parts and evidence/approval manifest. This produces a structured audio package, not a mastered commercial audiobook or captioned MP4.
 
-- import PDFs (and later EPUB/text)
-- navigate chapters or semantic sections
-- synthesize and play narration while words highlight in sync
-- connect the LLM and voice services you already pay for
-- ask questions with page/section citations and save notes locally
-- let agents build structured audio/video jobs or turn a book into a reusable, evidence-backed skill
-
-The exported skill is a navigation guide, not a static summary. Given a task, it selects the most relevant chapter context, graph neighborhood, figures/tables, and exact passages within a bounded context budget. It also tells the agent how to use that context, when it is making an inference, and when the book does not support an answer.
+There is no question-answering/chat UI or EPUB import yet. The evidence/navigation APIs can support an external agent, but those planned product experiences are not implemented here.
 
 ## Status
 
@@ -21,19 +16,21 @@ Early implementation. The evidence/navigation foundation, deterministic local PD
 
 ## Developer quick start
 
-Requires Node.js 22+ and pnpm 11.
+Requires Node.js 22.13+ (native SQLite; verified on 22.22) and pnpm 11.
 
 ```sh
-pnpm install
+git clone https://github.com/MikWess/scribe-skill.git
+cd scribe-skill
+pnpm install --frozen-lockfile
 pnpm check
 pnpm fixtures:generate work/fixtures
-pnpm pdf:inspect work/fixtures/digital-two-column.pdf work/library
+pnpm pdf:inspect work/fixtures/digital-two-column.pdf work/dev-library
 pnpm --filter @scribe-skill/reader dev:stack
 ```
 
 The inspection command stores the source by hash, extracts blocks into SQLite, renders page 1 to PNG, reports page quality, and prints source text with evidence coordinates. Image-only PDFs are marked `ocr-required` rather than treated as searchable.
 
-The reader command starts the loopback-only local service and browser UI at `http://localhost:5173`. It uses an explicitly enabled development token; direct service use requires `SCRIBE_SKILL_TOKEN`. The Electron desktop host starts the same service itself on a random port with an ephemeral token, so `pnpm --filter @scribe-skill/reader desktop:dev` needs no separate server process. Build an unpacked desktop app for the current platform with `pnpm --filter @scribe-skill/reader desktop:build`.
+The reader command starts the loopback-only local service and browser UI at `http://127.0.0.1:5173`. In the reader, choose a PDF file or enter its absolute path to import it; the CLI inspection does not automatically select that document in the UI. Both examples use `work/dev-library` under the repository root. It uses an explicitly enabled development token; direct service use requires `SCRIBE_SKILL_TOKEN`. The Electron desktop host starts the same service itself on a random port with an ephemeral token, so `pnpm --filter @scribe-skill/reader desktop:dev` needs no separate server process. Build an unpacked desktop app for the current platform with `pnpm --filter @scribe-skill/reader desktop:build`.
 
 Select a section in the reader to open its narration studio. Device voices need no API key and preview the current cited script with browser boundary highlighting. In the desktop app, OpenAI and ElevenLabs keys are encrypted with the operating system's secure storage and never written to SQLite. The browser development surface reads `OPENAI_API_KEY` or `ELEVENLABS_API_KEY` from the local service environment instead. OpenAI audio is deliberately labeled as having no synchronized timestamps; the ElevenLabs timestamp endpoint supplies exact character alignment when returned by the provider.
 
@@ -41,12 +38,23 @@ Open **Cited audiobook** below the narration studio to plan one section or the c
 
 Agents use the same token-protected loopback API: `POST /api/audiobooks/plans` with an `Idempotency-Key`, then `/:id/confirm`, `/:id/start`, status polling, review, and export actions. Start/resume return `202`; poll `GET /api/audiobooks/:id` until a terminal or review state. On failure, inspect `chunks`, `POST /api/audiobooks/:id/chunks/:chunkId/retry` for each failed/cancelled/interrupted part, then `POST /api/audiobooks/:id/resume`; completed parts are not called again. Every run is persisted in SQLite, carries schema version `1`, and exposes machine-readable states and part-level failures. No live provider call is used in the test suite; fake providers verify the complete workflow.
 
+## Local configuration and troubleshooting
+
+- `SCRIBE_SKILL_WORKSPACE` changes the service's local library directory. Import, progress, notes, and jobs are stored there. Keep personal libraries out of Git.
+- To avoid occupied ports: `SCRIBE_SKILL_PORT=4318 SCRIBE_SKILL_UI_PORT=5188 pnpm --filter @scribe-skill/reader dev:stack`. The service allowlist follows the chosen reader port; the UI stops if that port is busy rather than silently switching to an unapproved origin.
+- `SCRIBE_SKILL_ALLOWED_ORIGINS` is an optional comma-separated override. Use exact local origins; an empty value permits none.
+- A direct service launch needs `SCRIBE_SKILL_TOKEN`. `dev:stack` deliberately opts into a known development token and is for loopback use only.
+- If a page or its image fails, the reader reports the error and preserves the previous successful page. Check the service terminal and retry navigation.
+- Browser device voices depend on your operating system and browser. A successful build does not confirm live microphone, speech, OS key storage, or a provider account.
+
+`pnpm check` runs type checks, offline tests with fake providers, fixture validation, and the reader build. It does not invoke a paid provider. For an actual PDF, use the bundled synthetic fixture first, then import a document you are entitled to process.
+
 ## Design principles
 
 1. **Your keys, your files, your choice.** Secrets live in local secure storage; book content is not uploaded unless a chosen provider call requires it.
 2. **Progressive work.** Begin listening after a section is ready; do not require transcription or audio generation for an entire book.
 3. **Provider-neutral.** Keep a stable internal contract across text-to-speech and AI providers.
-4. **Grounded inspection.** Answers show the supporting book passages.
+4. **Grounded inspection.** Notes and exports retain supporting book passages.
 5. **Agent-native, not agent-only.** Every important capability is usable from the UI and a documented local API/CLI.
 
 ## License
